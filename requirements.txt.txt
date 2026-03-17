@@ -1,6 +1,0 @@
-streamlit
-geopandas
-folium
-streamlit-folium
-earthengine-api
-pandas
