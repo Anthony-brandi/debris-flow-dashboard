@@ -24,11 +24,11 @@ if 'ee_initialized' not in st.session_state:
             if "EARTHENGINE_JSON" in st.secrets:
                 creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
                 credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
-                ee.Initialize(credentials, project='strange-bird-461405-v7')
+                ee.Initialize(credentials, project='gee-streamlit-app-490500')
             else:
-                ee.Initialize(project='strange-bird-461405-v7')
+                ee.Initialize(project='gee-streamlit-app-490500')
         except FileNotFoundError:
-            ee.Initialize(project='strange-bird-461405-v7')
+            ee.Initialize(project='gee-streamlit-app-490500')
             
         st.session_state['ee_initialized'] = True
     except Exception as e:
@@ -36,11 +36,10 @@ if 'ee_initialized' not in st.session_state:
 
 @st.cache_data
 def load_and_clean_data():
-    path = '/Users/anthonybrandi/Desktop/All Da Folders/QGIS/Senior Project/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
-    fires = gpd.read_file(path)
+    path = 'CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
+    fires = gpd.read_file(path) # <-- This was accidentally deleted!
     fires = fires.dissolve(by='incident_n').reset_index()
     return fires.to_crs(epsg=4326)
-
 # ==========================================
 # PAGE 1: INTERACTIVE RISK MAP
 # ==========================================
