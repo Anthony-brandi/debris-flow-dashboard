@@ -49,6 +49,8 @@ if page == "Interactive Risk Map":
         fire_list = sorted(cal_fires['incident_n'].dropna().unique())
         selected_fire = st.sidebar.selectbox("Select Wildfire Incident", fire_list)
         fire_data = cal_fires[cal_fires['incident_n'] == selected_fire]
+        
+        # Centroid defined early to prevent 'not defined' errors
         centroid_point = fire_data.geometry.centroid.iloc[0]
         
         st.sidebar.markdown("---")
@@ -82,42 +84,36 @@ if page == "Interactive Risk Map":
                 fire_start_dt = pd.to_datetime(fire_data[date_col].iloc[0]) if date_col else datetime(2021, 6, 1)
                 
                 pre_date = ee.Date(fire_start_dt.strftime('%Y-%m-%d')).advance(-1, 'year')
-                post_date = ee.Date(fire_start_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
+                target_date = ee.Date(fire_start_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
 
-                def get_nbr_median(target_date):
+                def get_nbr_median(date_obj):
                     return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area)\
-                        .filterDate(target_date.advance(-1, 'month'), target_date.advance(1, 'month'))\
+                        .filterDate(date_obj.advance(-1, 'month'), date_obj.advance(1, 'month'))\
                         .median().clip(area).normalizedDifference(['B8', 'B12'])
 
-                dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(post_date))
+                dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
 
-                # --- PRECIPITATION (NASA GPM V07 FIX) ---
-                # Note: Band is now 'precipitationCal' in IMERG V07
+                # --- PRECIPITATION (NASA GPM V07) ---
+                # Fixed: Using the 'precipitation' band as indicated by your error log
                 precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07")\
                     .filterBounds(area)\
-                    .filterDate(post_date.advance(-1, 'month'), post_date)\
-                    .select('precipitationCal')\
+                    .filterDate(target_date.advance(-1, 'month'), target_date)\
+                    .select('precipitation')\
                     .sum().clip(area)
-
-                # --- TOPOGRAPHY ---
-                dem = ee.Image("USGS/SRTMGL1_003")
-                slope = ee.Terrain.slope(dem).clip(area)
 
                 # --- STATISTICAL COMPUTATION ---
                 total_acres = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
                 high_sev_acres = dnbr.gt(0.44).multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 30).getInfo().get('nd', 0) * 0.000247105
-                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitationCal', 0)
+                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitation', 0)
                 
-                # Runoff Calculation
-                runoff_index = dnbr.multiply(precip).reduceRegion(ee.Reducer.max(), area.geometry(), 1000).getInfo().get('nd', 0)
+                # Recovery % Logic
                 recovery_pct = max(0, min(100, (100 - ((high_sev_acres / (total_acres * 0.15)) * 100))))
 
                 # METRICS DASHBOARD
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3 = st.columns(3)
                 m1.metric("High Severity", f"{high_sev_acres:,.1f} Ac")
                 m2.metric("Landscape Healing", f"{recovery_pct:.1f}%")
                 m3.metric("Rainfall Accumulation", f"{avg_precip:,.1f} mm")
-                m4.metric("Runoff Intensity", f"{runoff_index:.2f}")
 
                 # RECOVERY ANALYSIS GRAPH
                 st.subheader("Vegetation Recovery and Watershed Stabilization")
@@ -140,6 +136,7 @@ if page == "Interactive Risk Map":
                     folium.TileLayer(tiles=precip.getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA GPM', name='Rainfall').add_to(m)
 
                 if show_risk:
+                    slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
                     hazard = slope.gte(slope_limit).And(dnbr.gt(0.1))
                     h_id = hazard.updateMask(hazard).getMapId({'palette': ['#ff7b00']})
                     folium.TileLayer(tiles=h_id['tile_fetcher'].url_format, attr='GEE', name='Risk Intersection').add_to(m)
@@ -195,5 +192,5 @@ elif page == "Technical Documentation":
     st.write("""
     Healthy watersheds act as a sponge. Burned watersheds act as a funnel.
     * **NASA GPM IMERG:** We pull global satellite rainfall data to track the exact amount of precipitation that hit the burn scar during your selected window.
-    * **Runoff Intensity:** By intersecting rainfall totals with the most severely burned soil, we identify the exact 'hotspots' where runoff velocity and flood risk were highest.
+    * **Runoff Response:** By intersecting rainfall totals with the most severely burned soil, we identify the exact 'hotspots' where runoff velocity and flood risk were highest.
     """)
