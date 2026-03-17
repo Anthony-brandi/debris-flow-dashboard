@@ -91,11 +91,12 @@ if page == "Interactive Risk Map":
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(post_date))
 
-                # --- PRECIPITATION (NASA GPM) ---
-                precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V06")\
+                # --- PRECIPITATION (NASA GPM V07 FIX) ---
+                # Note: Band is now 'precipitationCal' in IMERG V07
+                precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07")\
                     .filterBounds(area)\
                     .filterDate(post_date.advance(-1, 'month'), post_date)\
-                    .select('precipitation')\
+                    .select('precipitationCal')\
                     .sum().clip(area)
 
                 # --- TOPOGRAPHY ---
@@ -105,28 +106,28 @@ if page == "Interactive Risk Map":
                 # --- STATISTICAL COMPUTATION ---
                 total_acres = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
                 high_sev_acres = dnbr.gt(0.44).multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 30).getInfo().get('nd', 0) * 0.000247105
-                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitation', 0)
+                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitationCal', 0)
                 
-                # Runoff Calculation (Proxy for Peak Flow)
+                # Runoff Calculation
                 runoff_index = dnbr.multiply(precip).reduceRegion(ee.Reducer.max(), area.geometry(), 1000).getInfo().get('nd', 0)
                 recovery_pct = max(0, min(100, (100 - ((high_sev_acres / (total_acres * 0.15)) * 100))))
 
                 # METRICS DASHBOARD
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("High Severity", f"{high_sev_acres:,.1f} Ac")
-                m2.metric("Healing Rate", f"{recovery_pct:.1f}%")
-                m3.metric("Rainfall", f"{avg_precip:,.1f} mm")
+                m2.metric("Landscape Healing", f"{recovery_pct:.1f}%")
+                m3.metric("Rainfall Accumulation", f"{avg_precip:,.1f} mm")
                 m4.metric("Runoff Intensity", f"{runoff_index:.2f}")
 
-                # CHART
-                st.subheader("Landscape Recovery Trend")
+                # RECOVERY ANALYSIS GRAPH
+                st.subheader("Vegetation Recovery and Watershed Stabilization")
                 chart_data = pd.DataFrame({
-                    "Stage": ["Post-Ignition", "Current State", "Restoration Goal"],
+                    "Observation Stage": ["Peak Vulnerability", "Current State", "Restoration Goal"],
                     "Unrecovered Acres": [total_acres * 0.15, high_sev_acres, total_acres * 0.01]
                 })
-                st.bar_chart(chart_data, x="Stage", y="Unrecovered Acres")
+                st.bar_chart(chart_data, x="Observation Stage", y="Unrecovered Acres")
 
-                # MAP
+                # MAP RENDER
                 m = folium.Map(location=[centroid_point.y, centroid_point.x], zoom_start=12, tiles=tile_url, attr="Google")
                 folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m)
 
@@ -136,12 +137,18 @@ if page == "Interactive Risk Map":
 
                 if show_precip:
                     p_vis = {'min': 0, 'max': 200, 'palette': ['f0f9e8', 'bae4bc', '7bccc4', '43a2ca', '0868ac']}
-                    folium.TileLayer(tiles=precip.getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA', name='Rainfall').add_to(m)
+                    folium.TileLayer(tiles=precip.getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA GPM', name='Rainfall').add_to(m)
 
                 if show_risk:
                     hazard = slope.gte(slope_limit).And(dnbr.gt(0.1))
                     h_id = hazard.updateMask(hazard).getMapId({'palette': ['#ff7b00']})
                     folium.TileLayer(tiles=h_id['tile_fetcher'].url_format, attr='GEE', name='Risk Intersection').add_to(m)
+
+                if show_infra:
+                    roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area)
+                    roads_img = ee.Image(0).mask(0).paint(roads, 1, 2)
+                    infra_id = roads_img.getMapId({'palette': ['#2ecc71']})
+                    folium.TileLayer(tiles=infra_id['tile_fetcher'].url_format, attr='TIGER', name='Infrastructure').add_to(m)
 
                 st_folium(m, use_container_width=True, height=750)
 
@@ -151,7 +158,7 @@ if page == "Interactive Risk Map":
             st_folium(m, use_container_width=True, height=750)
 
     except Exception as e:
-        st.error(f"Analysis Runtime Error: {e}")
+        st.error(f"Analysis Error: {e}")
 
 # ==========================================
 # PAGE 2: USER MANUAL
@@ -161,12 +168,12 @@ elif page == "User Manual":
     st.markdown("---")
     st.header("Step-by-Step Instructions")
     st.write("""
-    1. **Incident Selection:** Use the dropdown menu to select a historical fire perimeter from the CAL FIRE database.
-    2. **Temporal Selection:** Use the slider to select a time interval. This retrieves satellite data from that specific month to check how much vegetation has grown back.
-    3. **Set Thresholds:** Adjust the 'Steepness Threshold' to filter for hillsides that are vulnerable to gravity-driven landslides.
-    4. **Hydrologic Run:** Click 'Execute Hydrologic Analysis' to overlay NASA rainfall data and calculate the Runoff Intensity.
+    1. **Incident Selection:** Use the dropdown menu to select a historical fire perimeter from the database.
+    2. **Temporal Selection:** Use the slider to select a post-fire interval. This determines the date of the satellite imagery used to assess vegetation regrowth.
+    3. **Set Thresholds:** Adjust the 'Slope Threshold' to identify hillsides vulnerable to gravity-driven landslides. 
+    4. **Execution:** Check 'Execute Hydrologic Analysis' to calculate rainfall totals and identify high-runoff hotspots.
     """)
-    st.info("The 'Healing Rate' shows what percentage of the initial burn scar has been replaced by new green vegetation.")
+    st.info("The 'Landscape Healing' metric calculates the percentage of the initial burn scar that has recovered since the fire began.")
 
 # ==========================================
 # PAGE 3: TECHNICAL DOCUMENTATION
@@ -176,16 +183,17 @@ elif page == "Technical Documentation":
     st.markdown("---")
     
     st.header("1. Multispectral Burn Analysis (dNBR)")
-    st.write("We utilize Sentinel-2 satellite data to calculate the Differenced Normalized Burn Ratio. Red zones indicate a total loss of canopy, leaving soil exposed to direct rain impact.")
+    st.write("This dashboard utilizes the Differenced Normalized Burn Ratio (dNBR) from the Sentinel-2 satellite. Red zones represent a loss of photosynthetic material, exposing soil to erosion.")
     
-
-    st.header("2. Topographic Risk and Tipping Points")
-    st.write("Slopes exceeding 27 degrees are geomorphically unstable after a fire. This dashboard isolates these areas to identify 'Initiation Zones' where debris flows are born.")
-    
+    st.header("2. Steepness and Landslide Risk")
+    st.write("""
+    Flat ground allows water to pool, but steep hillsides create velocity. This slider helps identify 'tipping points' 
+    where the terrain is so steep that gravity can easily pull destabilized soil down into canyons, creating debris flows.
+    """)
 
     st.header("3. The Watershed Runoff Effect")
     st.write("""
-    When rain hits a healthy forest, the trees slow it down. After a fire, the watershed becomes a 'parking lot.'
-    * **NASA GPM IMERG:** This dashboard pulls global satellite rainfall data to see exactly how much water fell on the burn scar.
-    * **Runoff Intensity:** By multiplying burn severity by rainfall, we identify 'Hotspots' where water velocity was highest, potentially burying roads or flooding canyons.
+    Healthy watersheds act as a sponge. Burned watersheds act as a funnel.
+    * **NASA GPM IMERG:** We pull global satellite rainfall data to track the exact amount of precipitation that hit the burn scar during your selected window.
+    * **Runoff Intensity:** By intersecting rainfall totals with the most severely burned soil, we identify the exact 'hotspots' where runoff velocity and flood risk were highest.
     """)
