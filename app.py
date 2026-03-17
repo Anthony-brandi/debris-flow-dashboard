@@ -12,14 +12,22 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(page_title="Wildfire Recovery & SGMA Analysis", layout="wide")
 
-# CA DWR Bulletin 118 URL
+# CA DWR Bulletin 118 Groundwater Basins URL
 GW_BASINS_URL = "https://opendata.arcgis.com/datasets/5da310c66bc649f0bc4ad21820b36873_0.geojson"
 
 @st.cache_data
 def load_fire_perimeters():
     path = 'CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
     fires = gpd.read_file(path)
-    return fires.dissolve(by='incident_n').reset_index().to_crs(epsg=4326)
+    # Dissolve by incident name to consolidate multi-part geometries
+    fires = fires.dissolve(by='incident_n').reset_index()
+    return fires.to_crs(epsg=4326)
+
+@st.cache_data
+def load_filtered_basins(fire_geometry):
+    # Pulls the full dataset but filters spatially to prevent browser memory errors (HTTP 400)
+    all_basins = gpd.read_file(GW_BASINS_URL)
+    return all_basins[all_basins.intersects(fire_geometry)]
 
 # ==========================================
 # 2. GEE INITIALIZATION
@@ -39,8 +47,8 @@ if 'ee_initialized' not in st.session_state:
 # ==========================================
 # 3. INTERACTIVE DASHBOARD
 # ==========================================
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Interactive Risk Map", "Technical Documentation"])
+st.sidebar.title("Analysis Control")
+page = st.sidebar.radio("Navigation", ["Interactive Risk Map", "Technical Documentation"])
 
 if page == "Interactive Risk Map":
     try:
@@ -48,99 +56,143 @@ if page == "Interactive Risk Map":
         fire_list = sorted(cal_fires['incident_n'].dropna().unique())
         selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", fire_list)
         fire_data = cal_fires[cal_fires['incident_n'] == selected_fire]
+        fire_geom = fire_data.geometry.iloc[0]
         
-        # Recovery period selection
         st.sidebar.markdown("---")
-        st.sidebar.subheader("Temporal Analysis")
-        recovery_months = st.sidebar.select_slider("Post-Fire Interval (Months)", options=[1, 6, 12, 18, 24], value=1)
+        st.sidebar.subheader("Temporal and Topographic Parameters")
+        recovery_months = st.sidebar.select_slider(
+            "Post-Fire Interval (Months)", 
+            options=[1, 6, 12, 18, 24], 
+            value=1,
+            help="Select the duration after ignition to evaluate vegetation regrowth and soil stability."
+        )
         
         analyze_btn = st.sidebar.checkbox("Execute Spatial Analysis", value=False)
-        slope_limit = st.sidebar.slider("Slope Threshold (Degrees)", 10, 45, 27)
+        slope_limit = st.sidebar.slider(
+            "Slope Threshold (Degrees)", 
+            10, 45, 27,
+            help="Specify the minimum gradient for debris flow initiation. USGS standards often utilize 27 degrees."
+        )
 
-        # Map Layers
-        with st.sidebar.expander("Layer Visibility"):
+        with st.sidebar.expander("Layer Visibility Settings"):
             show_recovery = st.checkbox("Burn Severity (dNBR)", value=True)
             show_basins = st.checkbox("Groundwater Basin Boundaries", value=True)
             show_risk = st.checkbox("Critical Hazard Intersection", value=False)
             basemap = st.radio("Basemap Style", ["Satellite", "Terrain"])
             tile_url = 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}' if basemap == "Satellite" else 'https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}'
 
-        st.title(f"{selected_fire} Debris Flow & Recovery Analysis")
+        st.title(f"{selected_fire} Debris Flow Risk and Aquifer Recharge Analysis")
         
-        # Map Setup
+        # Map Initialization
         centroid = fire_data.geometry.centroid.iloc[0]
         m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles=tile_url, attr="Google")
-        folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent'}).add_to(m)
+        folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m)
 
         if analyze_btn:
-            with st.spinner("Processing geospatial data..."):
+            with st.spinner("Processing geospatial datasets..."):
                 area = ee.FeatureCollection(fire_data.__geo_interface__)
                 
-                # --- DNBR CALCULATION ---
-                fire_date = pd.to_datetime(fire_data['ALARM_DATE'].iloc[0]) if 'ALARM_DATE' in fire_data.columns else datetime(2021,6,1)
-                pre_date = ee.Date(fire_date.strftime('%Y-%m-%d')).advance(-1, 'year')
-                post_date = ee.Date(fire_date.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
+                # --- TEMPORAL DNBR CALCULATION ---
+                # Attempt to parse fire start date from attributes
+                date_col = next((c for c in ['ALARM_DATE', 'START_DATE', 'alarm_date'] if c in fire_data.columns), None)
+                fire_start_dt = pd.to_datetime(fire_data[date_col].iloc[0]) if date_col else datetime(2021, 6, 1)
+                
+                pre_date = ee.Date(fire_start_dt.strftime('%Y-%m-%d')).advance(-1, 'year')
+                post_date = ee.Date(fire_start_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
 
-                def get_nbr(date):
-                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area)\
-                        .filterDate(date.advance(-1,'month'), date.advance(1,'month'))\
+                def get_nbr_median(target_date):
+                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")\
+                        .filterBounds(area)\
+                        .filterDate(target_date.advance(-1, 'month'), target_date.advance(1, 'month'))\
                         .median().clip(area).normalizedDifference(['B8', 'B12'])
 
-                dnbr = get_nbr(pre_date).subtract(get_nbr(target_date))
+                nbr_pre = get_nbr_median(pre_date)
+                nbr_post = get_nbr_median(post_date)
+                dnbr = nbr_pre.subtract(nbr_post)
 
-                # --- STATISTICAL ANALYSIS ---
-                # 1. Total Acreage
-                total_area_m2 = fire_data.to_crs(epsg=3310).area.sum()
-                total_acres = total_area_m2 * 0.000247105
-
-                # 2. Burn Severity Class Distribution (Acreage)
-                # Thresholds: High (>0.44), Moderate (0.1 - 0.44), Low/Unburned (<0.1)
-                high_sev = dnbr.gt(0.44).multiply(ee.Image.pixelArea()).reduceRegion(reducer=ee.Reducer.sum(), geometry=area.geometry(), scale=30).getInfo().get('nd', 0)
-                mod_sev = dnbr.gt(0.1).And(dnbr.lte(0.44)).multiply(ee.Image.pixelArea()).reduceRegion(reducer=ee.Reducer.sum(), geometry=area.geometry(), scale=30).getInfo().get('nd', 0)
-                
-                high_acres = high_sev * 0.000247105
-                mod_acres = mod_sev * 0.000247105
-
-                # 3. Slope Analysis
+                # --- TOPOGRAPHIC ANALYSIS ---
                 dem = ee.Image("USGS/SRTMGL1_003")
                 slope = ee.Terrain.slope(dem).clip(area)
-                steep_area = slope.gte(slope_limit).multiply(ee.Image.pixelArea()).reduceRegion(reducer=ee.Reducer.sum(), geometry=area.geometry(), scale=30).getInfo().get('slope', 0)
-                steep_acres = steep_area * 0.000247105
+                
+                # Statistics Calculation
+                total_acres = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
+                
+                # Calculate acreage of High Severity (dNBR > 0.44)
+                high_sev_mask = dnbr.gt(0.44)
+                high_acres = high_sev_mask.multiply(ee.Image.pixelArea()).reduceRegion(
+                    reducer=ee.Reducer.sum(), geometry=area.geometry(), scale=30
+                ).getInfo().get('nd', 0) * 0.000247105
 
-                # --- SIDEBAR STATISTICS PANEL ---
+                # Calculate acreage of steep terrain
+                steep_mask = slope.gte(slope_limit)
+                steep_acres = steep_mask.multiply(ee.Image.pixelArea()).reduceRegion(
+                    reducer=ee.Reducer.sum(), geometry=area.geometry(), scale=30
+                ).getInfo().get('slope', 0) * 0.000247105
+
+                # Sidebar Metrics
                 st.sidebar.markdown("---")
-                st.sidebar.subheader("Quantitative Results")
-                st.sidebar.write(f"Total Area: {total_acres:,.1f} ac")
-                
-                col1, col2 = st.sidebar.columns(2)
-                col1.metric("High Severity", f"{high_acres:,.1f} ac")
-                col2.metric("Steep Terrain", f"{steep_acres:,.1f} ac")
-                
+                st.sidebar.subheader("Statistical Summary")
+                st.sidebar.write(f"Total Perimeter Area: {total_acres:,.1f} acres")
+                st.sidebar.metric("High Severity Area", f"{high_acres:,.1f} ac")
+                st.sidebar.metric("Steep Terrain Area", f"{steep_acres:,.1f} ac")
+
                 # --- LAYER RENDERING ---
                 if show_basins:
-                    # FIX: Filter GeoJSON to specific fire area to avoid HTTP 400 error
-                    basins = gpd.read_file(GW_BASINS_URL)
-                    local_basins = basins[basins.intersects(fire_data.geometry.iloc[0])]
-                    folium.GeoJson(local_basins, name="Groundwater Basins", 
-                                   style_function=lambda x: {'fillColor': '#3498db', 'color': 'blue', 'weight': 1, 'fillOpacity': 0.1},
-                                   tooltip=folium.GeoJsonTooltip(fields=['Basin_Name'])).add_to(m)
+                    local_basins = load_filtered_basins(fire_geom)
+                    folium.GeoJson(
+                        local_basins, 
+                        name="Groundwater Basins",
+                        style_function=lambda x: {'fillColor': '#3498db', 'color': 'blue', 'weight': 1, 'fillOpacity': 0.15},
+                        tooltip=folium.GeoJsonTooltip(fields=['Basin_Name'], aliases=['Basin Name:'])
+                    ).add_to(m)
 
                 if show_recovery:
                     dnbr_vis = {'min': -0.1, 'max': 0.5, 'palette': ['ffffff', '7ad071', 'f9e072', 'ff0000']}
-                    dnbr_id = dnbr.getMapId(dnbr_vis)
-                    folium.TileLayer(tiles=dnbr_id['tile_fetcher'].url_format, attr='GEE', name='dNBR Severity', opacity=0.6).add_to(m)
+                    dnbr_mapid = dnbr.getMapId(dnbr_vis)
+                    folium.TileLayer(tiles=dnbr_mapid['tile_fetcher'].url_format, attr='Sentinel-2', name='Burn Severity', opacity=0.7).add_to(m)
 
                 if show_risk:
-                    hazard = slope.gte(slope_limit).And(dnbr.gt(0.1))
-                    h_id = hazard.updateMask(hazard).getMapId({'palette': ['#ff7b00']})
-                    folium.TileLayer(tiles=h_id['tile_fetcher'].url_format, attr='GEE', name='Hazard Intersection').add_to(m)
+                    hazard = steep_mask.And(dnbr.gt(0.1))
+                    h_mapid = hazard.updateMask(hazard).getMapId({'palette': ['#ff7b00']})
+                    folium.TileLayer(tiles=h_mapid['tile_fetcher'].url_format, attr='GEE', name='Hazard Intersection').add_to(m)
 
         st_folium(m, use_container_width=True, height=750, key="map_main")
 
     except Exception as e:
-        st.error(f"Analysis Error: {e}")
+        st.error(f"Analysis Runtime Error: {e}")
 
+# ==========================================
+# 4. TECHNICAL DOCUMENTATION
+# ==========================================
 elif page == "Technical Documentation":
-    st.title("Scientific Methodology")
+    st.title("Scientific Methodology and Policy Implications")
     st.markdown("---")
-    st.write("Quantitative analysis is performed using Sentinel-2 Multi-Spectral Instrument (MSI) data and SRTM Digital Elevation Models.")
+    
+    st.header("1. Significance of the Slope Threshold")
+    st.write("""
+    The Slope Threshold slider defines the gravitational potential energy required to initiate a mass wasting event. 
+    Post-fire debris flows typically originate in upland 'initiation zones' where gradients exceed the angle of repose for destabilized soil. 
+    According to USGS standards, slopes greater than 27 degrees are considered high-risk corridors. Adjusting this slider 
+    allows researchers to perform sensitivity analysis on different geomorphic settings.
+    """)
+    
+
+    st.header("2. Temporal Analysis: The Post-Fire Interval")
+    st.write("""
+    The Post-Fire Interval slider accounts for two critical variables: Hydrophobicity and Vegetation Succession. 
+    Immediately following a fire (1-6 months), soils often exhibit 'hydrophobic' properties, where ash and charred organic 
+    matter form a water-repellent layer, drastically increasing runoff. 
+    
+    As the interval increases (12-24 months), secondary succession occurs as pioneer plant species establish root systems 
+    that anchor the soil and increase the 'roughness' of the landscape, reducing velocity and increasing groundwater 
+    infiltration. This dashboard uses multi-temporal Sentinel-2 imagery to monitor this recovery in real-time.
+    """)
+    
+
+    st.header("3. Groundwater Recharge and SGMA")
+    st.write("""
+    Under the Sustainable Groundwater Management Act (SGMA), Groundwater Sustainability Agencies (GSAs) must maintain 
+    the 'recharge potential' of their basins. Severely burned landscapes represent a temporary loss of recharge capacity. 
+    By intersecting burn severity with groundwater basin boundaries, this tool identifies areas where restoration 
+    is required to protect future water security and prevent subsidence.
+    """)
