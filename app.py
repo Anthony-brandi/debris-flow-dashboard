@@ -56,17 +56,16 @@ if page == "Interactive Risk Map":
 
         with st.sidebar.expander("Map Layer Settings", expanded=True):
             show_recovery = st.checkbox("Burn Severity (dNBR)", value=True)
-            show_precip = st.checkbox("Precipitation (NASA GPM)", value=True) # Enabled for testing
+            show_precip = st.checkbox("Precipitation (NASA GPM)", value=True)
             show_risk = st.checkbox("Hazard Intersection", value=False)
             show_watersheds = st.checkbox("Watershed Outlines", value=False)
-            show_infra = st.checkbox("Infrastructure (Roads)", value=False)
             basemap = st.radio("Style", ["Satellite", "Terrain"])
             tile_url = 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}' if basemap == "Satellite" else 'https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}'
 
         st.title(f"{selected_fire} Runoff Hazard Assessment")
         
         if analyze_btn:
-            with st.spinner("Processing multispectral and rainfall data..."):
+            with st.spinner("Retrieving geospatial and satellite data..."):
                 area = ee.FeatureCollection(fire_data.__geo_interface__)
                 
                 # --- DATE LOGIC ---
@@ -82,17 +81,25 @@ if page == "Interactive Risk Map":
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
 
-                # --- PRECIPITATION (NASA GPM V07 - FIXED TRANSPARENCY) ---
-                precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07")\
+                # --- PRECIPITATION (NASA GPM V07 WITH FALLBACK) ---
+                precip_col = ee.ImageCollection("NASA/GPM_L3/IMERG_V07")\
                     .filterBounds(area)\
                     .filterDate(target_date.advance(-1, 'month'), target_date)\
-                    .select('precipitation')\
-                    .sum().clip(area)
+                    .select('precipitation')
+                
+                # Check if data exists for this month, if not, alert user
+                has_data = precip_col.size().getInfo()
+                if has_data > 0:
+                    precip = precip_col.sum().clip(area)
+                    avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitation', 0)
+                else:
+                    st.warning("Precipitation data for this specific month is not yet available in the NASA GPM database. Showing 0mm.")
+                    precip = ee.Image(0).clip(area)
+                    avg_precip = 0
 
                 # --- STATS ---
                 total_acres = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
                 high_sev_acres = dnbr.gt(0.44).multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 30).getInfo().get('nd', 0) * 0.000247105
-                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitation', 0)
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("High Severity Area", f"{high_sev_acres:,.1f} Ac")
@@ -102,38 +109,28 @@ if page == "Interactive Risk Map":
                 # --- MAP ---
                 m = folium.Map(location=[centroid_point.y, centroid_point.x], zoom_start=12, tiles=tile_url, attr="Google")
                 
-                # Professional Floating Legend
+                # LEGEND FIX: High contrast text on white background
                 legend_html = f"""
-                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
-                <b>Analysis Legend</b><br>
-                <i style="background:red; width:10px; height:10px; float:left; margin-right:5px; border:1px solid black;"></i> Perimeter<br>
-                <i style="background:#bd0026; width:10px; height:10px; float:left; margin-right:5px;"></i> Burn Scar (High)<br>
-                <i style="background:#084594; width:10px; height:10px; float:left; margin-right:5px;"></i> Heavy Rainfall<br>
-                <i style="background:#ff7b00; width:10px; height:10px; float:left; margin-right:5px;"></i> Hazard Zone<br>
-                <i style="border: 1px solid purple; width:10px; height:2px; float:left; margin-right:5px; margin-top:4px;"></i> Watershed
+                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid black; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
+                <b style="color:black;">Analysis Legend</b><br>
+                <i style="background:red; width:10px; height:10px; float:left; margin-right:5px; border:1px solid black;"></i> <span style="color:black;">Perimeter</span><br>
+                <i style="background:#bd0026; width:10px; height:10px; float:left; margin-right:5px;"></i> <span style="color:black;">Burn Scar (High)</span><br>
+                <i style="background:#084594; width:10px; height:10px; float:left; margin-right:5px;"></i> <span style="color:black;">Heavy Rainfall</span><br>
+                <i style="background:#ff7b00; width:10px; height:10px; float:left; margin-right:5px;"></i> <span style="color:black;">Hazard Zone</span><br>
+                <i style="border: 1px solid purple; width:10px; height:2px; float:left; margin-right:5px; margin-top:4px;"></i> <span style="color:black;">Watershed</span>
                 </div>"""
                 m.get_root().html.add_child(folium.Element(legend_html))
 
-                if show_precip:
-                    # FIXED: Masking precip to remove "white-out". Only shows rain > 1mm.
-                    p_vis = {'min': 1, 'max': 150, 'palette': ['#f7fbff','#deebf7','#9ecae1','#4292c6','#084594']}
-                    precip_masked = precip.updateMask(precip.gt(1))
-                    folium.TileLayer(tiles=precip_masked.getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA', name='Rainfall', opacity=0.5).add_to(m)
+                if show_precip and has_data > 0:
+                    # Masking ensures only rain > 5mm is shown to prevent map 'washing out'
+                    p_vis = {'min': 5, 'max': 150, 'palette': ['#f7fbff','#deebf7','#9ecae1','#4292c6','#084594']}
+                    precip_masked = precip.updateMask(precip.gt(5))
+                    folium.TileLayer(tiles=precip_masked.getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA', name='Rainfall', opacity=0.45).add_to(m)
 
                 if show_recovery:
                     vis = {'min': 0.1, 'max': 0.5, 'palette': ['#ffffb2', '#fecc5c', '#fd8d3c', '#f03b20', '#bd0026']}
                     dnbr_masked = dnbr.updateMask(dnbr.gt(0.1))
-                    folium.TileLayer(tiles=dnbr_masked.getMapId(vis)['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.6).add_to(m)
-
-                if show_watersheds:
-                    watersheds = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
-                    w_outline = ee.Image(0).mask(0).paint(watersheds, 'purple', 2)
-                    folium.TileLayer(tiles=w_outline.getMapId({'palette':['purple']})['tile_fetcher'].url_format, attr='USGS', name='Watersheds').add_to(m)
-
-                if show_risk:
-                    slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
-                    hazard = slope.gte(slope_limit).And(dnbr.gt(0.1))
-                    folium.TileLayer(tiles=hazard.updateMask(hazard).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m)
+                    folium.TileLayer(tiles=dnbr_masked.getMapId(vis)['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.7).add_to(m)
 
                 folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 3}).add_to(m)
                 st_folium(m, use_container_width=True, height=750)
@@ -145,14 +142,3 @@ if page == "Interactive Risk Map":
 
     except Exception as e:
         st.error(f"Error: {e}")
-
-# ==========================================
-# PAGE 2 & 3: DOCUMENTATION
-# ==========================================
-elif page == "User Manual":
-    st.title("User Manual")
-    st.write("1. Select an incident.\n2. Adjust your slope and time sliders.\n3. Run analysis to identify where rain impacts burned watersheds.")
-
-elif page == "Technical Documentation":
-    st.title("Technical Methodology")
-    st.write("Detailed methodology on dNBR spectral indices, NASA GPM rainfall integration, and topographic thresholds.")
