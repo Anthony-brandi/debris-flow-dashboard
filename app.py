@@ -63,7 +63,7 @@ if page == "Interactive Risk Map":
         
         # --- RECOVERY MONITOR ---
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🌱 Vegetation Recovery Monitor")
+        st.sidebar.subheader(" Vegetation Recovery Monitor")
         recovery_months = st.sidebar.select_slider(
             "Months Post-Fire to Analyze",
             options=[1, 6, 12, 18, 24],
