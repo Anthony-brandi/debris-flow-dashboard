@@ -17,14 +17,14 @@ def load_fire_perimeters():
     path = 'CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
     fires = gpd.read_file(path)
     
-    # Robust date detection
+    # Robust multi-column date detection to prevent crashes
     date_options = ['ALARM_DATE', 'ALARM_DAT', 'START_DATE', 'alarm_date', 'alarm_dat']
     found_col = next((col for col in date_options if col in fires.columns), None)
     
     if found_col:
         fires['final_date'] = pd.to_datetime(fires[found_col], errors='coerce')
     else:
-        fires['final_date'] = pd.to_datetime('2021-06-01')
+        fires['final_date'] = pd.to_datetime('2021-06-01') # Absolute fallback
         
     fires = fires.dissolve(by='incident_n').reset_index()
     return fires.to_crs(epsg=4326)
@@ -45,7 +45,7 @@ if 'ee_initialized' not in st.session_state:
         st.error(f"Initialization Error: {e}")
 
 # ==========================================
-# 3. SIDEBAR CONTROLS (FULL RESTORATION)
+# 3. SIDEBAR CONTROLS
 # ==========================================
 st.sidebar.title("Main Menu")
 page = st.sidebar.radio("Navigation", ["Interactive Risk Map", "User Manual", "Technical Documentation"])
@@ -66,28 +66,25 @@ if page == "Interactive Risk Map":
         analyze_btn = st.sidebar.checkbox("Execute Hydrologic Analysis", value=True)
         slope_limit = st.sidebar.slider("Slope Threshold (Degrees)", 10, 45, 27)
 
-        # MANDATORY LAYER TABS (Fixed and always visible)
+        # FULL LAYER VISIBILITY CONTROLS
         st.sidebar.markdown("---")
         st.sidebar.subheader("Map Layer Controls")
         show_recovery = st.sidebar.checkbox("Burn Severity (dNBR)", value=True)
         show_precip = st.sidebar.checkbox("Precipitation (NASA GPM)", value=False)
         show_risk = st.sidebar.checkbox("Hazard Zones (Slope+Burn)", value=True)
-        show_watersheds = st.sidebar.checkbox("Watershed Outlines", value=True)
-        show_infra = st.sidebar.checkbox("Clipped Roads (TIGER)", value=True)
+        show_watersheds = st.sidebar.checkbox("Watershed Outlines (HUC-12)", value=True)
+        show_infra = st.sidebar.checkbox("Clipped Roads (TIGER/Line)", value=True)
         
-        basemap = st.sidebar.radio("Reference Style", ["Satellite", "Terrain"])
+        basemap = st.sidebar.radio("Basemap Style", ["Satellite", "Terrain"])
         tile_url = 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}' if basemap == "Satellite" else 'https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}'
 
-        # ==========================================
-        # 4. ANALYTICS & VISUALIZATION
-        # ==========================================
         st.title(f"{selected_fire} Runoff Hazard Assessment")
         
         if analyze_btn:
-            with st.spinner("Executing spatial intersection..."):
+            with st.spinner("Executing spatial computation..."):
                 area = ee.FeatureCollection(fire_data.__geo_interface__)
                 
-                # Spectral Analysis
+                # --- TEMPORAL DNBR ---
                 pre_date = ee.Date(actual_date.strftime('%Y-%m-%d')).advance(-1, 'year')
                 target_date = ee.Date(actual_date.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
 
@@ -97,36 +94,26 @@ if page == "Interactive Risk Map":
                         .median().clip(area).normalizedDifference(['B8', 'B12'])
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
-                
-                # Topography
-                dem = ee.Image("USGS/SRTMGL1_003")
-                slope = ee.Terrain.slope(dem).clip(area)
 
-                # Rainfall (NASA GPM)
-                precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area)\
-                    .filterDate(target_date.advance(-1, 'month'), target_date)\
-                    .select('precipitation').sum().clip(area)
-
-                # Stats Calculation
+                # --- STATS ---
                 total_acres = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
                 high_sev_acres = dnbr.gt(0.44).multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 30).getInfo().get('nd', 0) * 0.000247105
-                avg_precip = precip.reduceRegion(ee.Reducer.mean(), area.geometry(), 1000).getInfo().get('precipitation', 0)
                 recovery_pct = max(0, min(100, (100 - ((high_sev_acres / (total_acres * 0.15)) * 100))))
 
                 # METRICS ROW
                 m1, m2, m3 = st.columns(3)
                 m1.metric("High Severity Area", f"{high_sev_acres:,.1f} Ac")
                 m2.metric("Healing Rate", f"{recovery_pct:.1f}%")
-                m3.metric("Rainfall (NASA GPM)", f"{avg_precip:,.1f} mm")
+                m3.metric("Total Perimeter", f"{total_acres:,.0f} Ac")
                 st.markdown("---")
 
-                # MAP RENDER
+                # --- MAP RENDER ---
                 centroid_point = fire_data.geometry.centroid.iloc[0]
                 m = folium.Map(location=[centroid_point.y, centroid_point.x], zoom_start=12, tiles=tile_url, attr="Google")
                 
-                # Legend Fix
+                # Dynamic Professional Legend
                 legend_html = f"""
-                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
+                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid black; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
                 <b style="color:black;">Analysis Legend</b><br>
                 <i style="background:red; width:10px; height:10px; float:left; margin-right:5px; border:1px solid black;"></i> Perimeter<br>
                 <i style="background:#bd0026; width:10px; height:10px; float:left; margin-right:5px;"></i> Burn Scar (High)<br>
@@ -140,11 +127,8 @@ if page == "Interactive Risk Map":
                     vis = {'min': 0.1, 'max': 0.5, 'palette': ['#ffffb2', '#fecc5c', '#fd8d3c', '#f03b20', '#bd0026']}
                     folium.TileLayer(tiles=dnbr.updateMask(dnbr.gt(0.1)).getMapId(vis)['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.7).add_to(m)
 
-                if show_precip:
-                    p_vis = {'min': 1, 'max': 150, 'palette': ['#f7fbff','#deebf7','#9ecae1','#4292c6','#084594']}
-                    folium.TileLayer(tiles=precip.updateMask(precip.gt(1)).getMapId(p_vis)['tile_fetcher'].url_format, attr='NASA', name='Rainfall', opacity=0.5).add_to(m)
-
                 if show_risk:
+                    slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
                     hazard = slope.gte(slope_limit).And(dnbr.gt(0.1))
                     folium.TileLayer(tiles=hazard.updateMask(hazard).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m)
 
@@ -161,31 +145,41 @@ if page == "Interactive Risk Map":
                 folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 3}).add_to(m)
                 st_folium(m, use_container_width=True, height=750)
 
+        else:
+            m = folium.Map(location=[fire_data.geometry.centroid.iloc[0].y, fire_data.geometry.centroid.iloc[0].x], zoom_start=12, tiles=tile_url, attr="Google")
+            folium.GeoJson(fire_data.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m)
+            st_folium(m, use_container_width=True, height=750)
+
     except Exception as e:
         st.error(f"Analysis Error: {e}")
 
 # ==========================================
-# 5. DOCUMENTATION (FULL RESTORATION)
+# 5. USER MANUAL (FULL TEXT)
 # ==========================================
 elif page == "User Manual":
-    st.title("User Manual")
+    st.title("User Manual: Post-Fire Hazard Assessment")
+    st.markdown("---")
     st.info("The Green lines represent Roads (TIGER/Line). These are clipped specifically to the fire boundary to show which transportation corridors are vulnerable.")
     st.header("Step-by-Step Instructions")
     st.write("""
-    1. **Incident Selection:** Use the dropdown menu to choose a historical wildfire perimeter.
-    2. **Timeline Analysis:** Adjust the observation slider to view landscape recovery at different monthly intervals.
-    3. **Parameter Tuning:** Set the Slope Threshold to identify high-gradient initiation zones.
-    4. **Visualization:** Toggle map layers in the sidebar to visualize the intersection of severe burn scars and critical terrain.
+    1. **Incident Selection:** Use the sidebar dropdown to choose a historical wildfire perimeter from the CAL FIRE / FIRIS database.
+    2. **Timeline Analysis:** Adjust the **Observation Window** slider. This determines the date of the satellite imagery used to assess vegetation regrowth (Succession). 
+    3. **Parameter Tuning:** Set the **Slope Threshold**. This isolates terrain that is steep enough to initiate a debris flow.
+    4. **Visualization:** Use the Map Layer Controls to toggle the visibility of Watershed boundaries, Road networks, and the Hazard Intersection zones.
     """)
 
+# ==========================================
+# 6. TECHNICAL DOCUMENTATION (FULL TEXT)
+# ==========================================
 elif page == "Technical Documentation":
-    st.title("Technical Methodology")
+    st.title("Technical Methodology & Data Interpretation")
     st.markdown("---")
-    st.subheader("Clipped Infrastructure")
-    st.write("Clipped Infrastructure: We use the 2016 TIGER/Line dataset and perform a spatial filter against the CAL FIRE incident perimeter.")
+    st.subheader("Clipped Infrastructure & Topography")
+    st.write("Clipped Infrastructure: We use the 2016 TIGER/Line dataset and perform a spatial filter against the CAL FIRE incident perimeter to identify transportation routes sitting in hazardous terrain.")
+    
     st.header("Scientific Framework")
     st.write("""
-    * **dNBR:** Differenced Normalized Burn Ratio. Uses SWIR and NIR bands to measure vegetation loss.
-    * **Hydrologic Response:** Modeling the transition of fire-impacted soils from a 'Sponge' (infiltration) to a 'Funnel' (runoff).
-    * **Topographic Initiation:** Identifying zones above 27 degrees where soil cohesion is compromised.
+    * **dNBR (Burn Severity):** Spectral differencing of the Near-Infrared and Shortwave-Infrared bands to quantify the loss of organic biomass.
+    * **Hydrologic Funneling:** Modeling the transition of watersheds from a 'Sponge' (pre-fire infiltration) to a 'Funnel' (post-fire runoff).
+    * **Geomorphic Initiation:** Identifying initiation zones where slopes exceed the critical threshold for soil cohesion loss (default 27°).
     """)
