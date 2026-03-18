@@ -40,16 +40,18 @@ def load_fire_perimeters():
 
 @st.cache_data
 def fetch_dins_damage(incident_name):
-    # CAL FIRE DINS API for live infrastructure damage
+    # Optimized CAL FIRE DINS API with Fuzzy Matching
     url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
+    clean_name = str(incident_name).strip().upper()
+    
     params = {
-        "where": f"INCIDENT_NAME = '{incident_name}' AND DAMAGE IN ('Destroyed', 'Major')",
-        "outFields": "DAMAGE, STRUCTURE_TYPE",
+        "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major')",
+        "outFields": "*",
         "returnCountOnly": "true",
         "f": "json"
     }
     try:
-        response = requests.get(url, params=params).json()
+        response = requests.get(url, params=params, timeout=10).json()
         return response.get('count', 0)
     except:
         return 0
@@ -84,8 +86,7 @@ if all_fires is not None:
     manual_baseline = st.sidebar.date_input("Pre-Fire Baseline Date", value=default_alarm_dt - timedelta(days=365))
     recovery_months = st.sidebar.select_slider("Observation Window (Months Post-Fire)", options=[1, 6, 12, 18, 24], value=1)
     
-    # NEW: Sensitivity Controls to fix the "Empty Map" issue
-    dnbr_limit = st.sidebar.slider("Burn Severity Threshold (dNBR)", 0.10, 0.70, 0.25, 0.05, help="Lower this value if the hazard area appears too small.")
+    dnbr_limit = st.sidebar.slider("Burn Severity Threshold (dNBR)", 0.10, 0.70, 0.25, 0.05)
     slope_limit = st.sidebar.slider("Critical Slope Threshold (Degrees)", 10, 45, 27)
 
 # ==========================================
@@ -102,7 +103,12 @@ if page == "1. Incident Briefing" and all_fires is not None:
     m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
     m3.metric("Lead Agency", fire_subset['agency'].iloc[0] if 'agency' in fire_subset.columns else "CAL FIRE")
-    m4.metric("Structures Destroyed", f"{destroyed_count}" if destroyed_count > 0 else "No Data / 0", help="Live data via CAL FIRE DINS API")
+    
+    # Updated display logic for the API pull
+    if destroyed_count > 0:
+        m4.metric("Structures Destroyed", f"{destroyed_count}")
+    else:
+        m4.metric("Structures Destroyed", "0 (Or Missing DINS Data)")
 
     st.markdown("---")
 
@@ -118,7 +124,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
     with col2:
         st.subheader("Historical Fire Fact Sheet")
         
-        # AGGRESSIVE GARBAGE FILTER: Hide messy backend GIS columns
         garbage_cols = ['objectid', 'globalid', 'shape', 'geometry', 'incident_1', 'poly_datec', 'creationda', 'creator', 'editdate', 'editor', 'shape_leng', 'shape_area', 'irwinid']
         valid_data = {}
         for col in fire_subset.columns:
@@ -138,7 +143,7 @@ if page == "1. Incident Briefing" and all_fires is not None:
         st.info(f"""
         **Geomorphic Context:**
         The {selected_name} fire altered the hydrologic baseline of this region. 
-        When high-severity canopy loss intersects with steep topography, the landscape loses its ability to act as a biological 'sponge.' 
+        When high-severity canopy loss intersects with steep topography, the landscape loses its ability to act as a biological sponge. 
         """)
 
 # ==========================================
@@ -174,13 +179,12 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 slope = ee.Terrain.slope(dem)
                 hillshade = ee.Terrain.hillshade(dem)
 
-                # Adjusted Hazard Mask using User-Defined dNBR Limit
                 hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
                 
                 try:
                     precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().clip(area)
-                    peak_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 100).getInfo().get('precipitation', 0)
-                    hazard_acres = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 90).getInfo().get('nd', 0) * 0.000247105
+                    peak_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 250).getInfo().get('precipitation', 0)
+                    hazard_acres = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 250).getInfo().get('nd', 0) * 0.000247105
                 except Exception:
                     peak_rain, hazard_acres = 0, 0
 
@@ -225,7 +229,7 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
         st.info("Toggle 'Activate Spatial Modeling Engine' to render layers.")
 
 # ==========================================
-# PAGE 3: STATISTICAL REPORT (UPGRADED)
+# PAGE 3: STATISTICAL REPORT
 # ==========================================
 elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Statistical Analysis")
@@ -253,10 +257,12 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = hazard_area_img.addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
                 
+                # OPTIMIZATION FIX: Increased scale to 250m and added tileScale to prevent timeout
                 reduced_stats = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
-                    scale=90
+                    scale=250,
+                    tileScale=4
                 ).getInfo()
                 
                 ws_data = []
@@ -304,7 +310,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
                         st.download_button("Download Matrix (CSV)", data=csv, file_name=f'{selected_name}_trigger_matrix.csv', mime='text/csv')
                         
                     with c2:
-                        # Upgraded Chart: Scatter plot showing Hazard Area vs Rainfall
                         st.subheader("Atmospheric Trigger Analysis")
                         scatter = alt.Chart(df_ws).mark_circle(size=200, color='#3498db', opacity=0.8).encode(
                             x=alt.X('Active Hazard Footprint (Acres):Q', title='Hazard Area (Acres)'),
@@ -312,12 +317,11 @@ elif page == "3. Statistical Report" and all_fires is not None:
                             tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)', 'Mean Rainfall (mm)']
                         ).properties(height=350)
                         
-                        # Add labels to the dots
                         text = scatter.mark_text(align='left', baseline='middle', dx=15, color="white").encode(text='HUC-12 Watershed Name:N')
                         st.altair_chart(scatter + text, use_container_width=True)
 
                 st.info("""
-                **Analytical Note:** This scatter matrix identifies 'Trigger Zones.' Watersheds positioned in the top-right quadrant exhibit both critical geomorphic instability (high hazard area) and significant atmospheric loading (high rainfall), making them prime candidates for immediate debris flow monitoring.
+                **Analytical Note:** This scatter matrix identifies Trigger Zones. Watersheds positioned in the top-right quadrant exhibit both critical geomorphic instability (high hazard area) and significant atmospheric loading (high rainfall), making them prime candidates for immediate debris flow monitoring.
                 """)
             
             except Exception as e:
