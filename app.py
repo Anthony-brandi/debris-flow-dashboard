@@ -104,7 +104,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
     m3.metric("Lead Agency", fire_subset['agency'].iloc[0] if 'agency' in fire_subset.columns else "CAL FIRE")
     
-    # Updated display logic for the API pull
     if destroyed_count > 0:
         m4.metric("Structures Destroyed", f"{destroyed_count}")
     else:
@@ -257,13 +256,20 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = hazard_area_img.addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
                 
-                # OPTIMIZATION FIX: Increased scale to 250m and added tileScale to prevent timeout
-                reduced_stats = combined_img.reduceRegions(
+                # OPTIMIZATION FIX: reduceRegions with scale, tileScale, and dropping geometry
+                reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
                     scale=250,
                     tileScale=4
-                ).getInfo()
+                )
+                
+                # CRITICAL PAYLOAD FIX: Remove geometry before sending data to Streamlit
+                def remove_geo(feature):
+                    return ee.Feature(None, feature.toDictionary())
+                
+                stats_only = reduced_stats_fc.map(remove_geo)
+                reduced_stats = stats_only.getInfo()
                 
                 ws_data = []
                 for f in reduced_stats['features']:
