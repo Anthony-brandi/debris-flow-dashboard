@@ -13,7 +13,6 @@ import altair as alt
 # ==========================================
 st.set_page_config(page_title="Watershed Risk Portal", layout="wide", page_icon="⛰️")
 
-# Professional GIS Dark Mode Styling
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -29,14 +28,13 @@ def load_fire_perimeters():
     path = 'CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
     try:
         fires = gpd.read_file(path)
-        # Robust date detection
         date_options = ['ALARM_DATE', 'ALARM_DAT', 'START_DATE', 'alarm_date', 'alarm_dat']
         found_col = next((col for col in date_options if col in fires.columns), None)
         fires['final_date'] = pd.to_datetime(fires[found_col], errors='coerce') if found_col else pd.to_datetime('2021-06-01')
         fires = fires.dissolve(by='incident_n').reset_index()
         return fires.to_crs(epsg=4326)
     except Exception as e:
-        st.error("Shapefile not found. Please ensure the 'CA_Perimeters' folder is in the same directory as this script.")
+        st.error("Shapefile not found. Please ensure the 'CA_Perimeters' folder is in the same directory.")
         return None
 
 if 'ee_initialized' not in st.session_state:
@@ -49,7 +47,7 @@ if 'ee_initialized' not in st.session_state:
             ee.Initialize(project='gee-streamlit-app-490500')
         st.session_state['ee_initialized'] = True
     except Exception as e:
-        st.error(f"Google Earth Engine Initialization Error: {e}")
+        st.error(f"GEE Init Error: {e}")
 
 # ==========================================
 # 3. SIDEBAR NAVIGATION
@@ -71,7 +69,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
     st.header(f"🔥 Incident Brief: {selected_name}")
     st.markdown("---")
     
-    # Metadata Row
     m1, m2, m3, m4 = st.columns(4)
     total_acres = (fire_subset.to_crs(epsg=3310).area.sum()) * 0.000247105
     
@@ -82,7 +79,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
 
     st.markdown("---")
 
-    # Context & Simple Map
     col1, col2 = st.columns([2, 1])
     
     with col1:
@@ -99,9 +95,9 @@ if page == "1. Incident Briefing" and all_fires is not None:
         The {selected_name} fire altered the hydrologic baseline of this region. 
         When high-severity canopy loss intersects with steep topography, the landscape loses its ability to act as a biological 'sponge.' 
         
-        This portal models the ensuing 'funnel' effect, mapping the specific initiation zones and stream valleys where post-fire debris flows are most likely to originate during heavy precipitation events.
+        This portal models the ensuing 'funnel' effect, mapping the specific initiation zones and stream valleys where post-fire debris flows are most likely to originate.
         """)
-        st.success("Proceed to '2. Interactive Analysis' to run the spatial intersection models.")
+        st.success("Proceed to '2. Interactive Analysis' in the sidebar to run the spatial intersection models.")
 
 # ==========================================
 # PAGE 2: INTERACTIVE ANALYSIS
@@ -109,11 +105,9 @@ if page == "1. Incident Briefing" and all_fires is not None:
 elif page == "2. Interactive Analysis" and all_fires is not None:
     st.title("🛠️ Interactive GIS Lab")
     
-    # Manual Baseline & Parameters
     st.sidebar.markdown("---")
     st.sidebar.subheader("Model Parameters")
     
-    # Allow user to change the baseline date
     manual_baseline = st.sidebar.date_input("Pre-Fire Baseline Date", value=default_alarm_dt - timedelta(days=365))
     recovery_months = st.sidebar.select_slider("Successional Window (Months Post-Fire)", options=[1, 6, 12, 18, 24], value=1)
     slope_limit = st.sidebar.slider("Critical Slope Threshold (°)", 10, 45, 27)
@@ -127,18 +121,18 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     show_streams = st.sidebar.checkbox("Stream Routing (HydroSHEDS)", value=True)
     show_infra = st.sidebar.checkbox("Road Vulnerability", value=False)
     
-    analyze_btn = st.button("Execute Spatial Modeling")
+    st.markdown("---")
+    # FIXED: Replaced button with a persistent toggle checkbox
+    run_analysis = st.toggle("Activate Spatial Modeling Engine", value=False)
 
-    if analyze_btn:
+    if run_analysis:
         with st.spinner("Processing multispectral and topographic data..."):
             area = ee.FeatureCollection(fire_subset.__geo_interface__)
             
-            # Dates
             pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
             fire_start_ee = ee.Date(default_alarm_dt.strftime('%Y-%m-%d'))
             target_date = fire_start_ee.advance(recovery_months, 'month')
 
-            # dNBR Calculation
             def get_nbr_median(date_obj):
                 return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area)\
                     .filterDate(date_obj.advance(-1, 'month'), date_obj.advance(1, 'month'))\
@@ -146,15 +140,12 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
 
             dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
             
-            # Topography & Hillshade (3D Representation)
             dem = ee.Image("USGS/SRTMGL1_003").clip(area)
             slope = ee.Terrain.slope(dem)
             hillshade = ee.Terrain.hillshade(dem)
 
-            # Hazard Logic
             hazard_mask = slope.gte(slope_limit).And(dnbr.gt(0.44))
 
-            # Map Rendering
             centroid = fire_subset.geometry.centroid.iloc[0]
             m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
             
@@ -177,7 +168,7 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
             folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 3}).add_to(m)
             st_folium(m, use_container_width=True, height=650)
     else:
-        st.info("Adjust your parameters in the sidebar and click 'Execute Spatial Modeling' to load the GIS layers.")
+        st.info("Toggle 'Activate Spatial Modeling Engine' above to calculate and render the active map layers.")
 
 # ==========================================
 # PAGE 3: STATISTICAL REPORT
@@ -189,7 +180,9 @@ elif page == "3. Statistical Report" and all_fires is not None:
     st.sidebar.subheader("Report Parameters")
     recovery_months = st.sidebar.select_slider("Successional Window (Months)", options=[1, 6, 12, 18, 24], value=1)
     slope_limit = st.sidebar.slider("Critical Slope Threshold (°)", 10, 45, 27)
-    run_stats = st.button("Generate Quantitative Report")
+    
+    # FIXED: Replaced button with a persistent toggle checkbox
+    run_stats = st.toggle("Generate Quantitative Report", value=False)
 
     if run_stats:
         with st.spinner("Reducing spatial data across HUC-12 boundaries..."):
@@ -199,42 +192,50 @@ elif page == "3. Statistical Report" and all_fires is not None:
             fire_start_ee = ee.Date(default_alarm_dt.strftime('%Y-%m-%d'))
             target_date = fire_start_ee.advance(recovery_months, 'month')
 
-            # Math Logic
             def get_nbr_median(date_obj):
                 return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area).filterDate(date_obj.advance(-1, 'month'), date_obj.advance(1, 'month')).median().clip(area).normalizedDifference(['B8', 'B12'])
 
             dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
             slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
             hazard_mask = slope.gte(slope_limit).And(dnbr.gt(0.44))
-            hazard_area_img = hazard_mask.multiply(ee.Image.pixelArea())
+            
+            # FIXED: Explicitly rename the band so Earth Engine can find it during the reduction
+            hazard_area_img = hazard_mask.multiply(ee.Image.pixelArea()).rename('hazard_area')
 
-            # Watershed Reduction
             huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
             
             def calc_hazard(feature):
-                stats = hazard_area_img.reduceRegion(reducer=ee.Reducer.sum(), geometry=feature.geometry(), scale=30, maxPixels=1e9)
-                return feature.set('hazard_acres', ee.Number(stats.get('slope')).multiply(0.000247105))
+                stats = hazard_area_img.reduceRegion(
+                    reducer=ee.Reducer.sum(), 
+                    geometry=feature.geometry(), 
+                    scale=30, 
+                    maxPixels=1e9
+                )
+                return feature.set('hazard_stats', stats)
 
             huc12_stats = huc12.map(calc_hazard).getInfo()
             
             ws_data = []
             for f in huc12_stats['features']:
                 props = f['properties']
+                # FIXED: Added Python-side safety checks so empty geometry returns 0 instead of crashing
+                stats_dict = props.get('hazard_stats', {})
+                if stats_dict is None: stats_dict = {}
+                raw_sq_meters = stats_dict.get('hazard_area', 0)
+                acres = raw_sq_meters * 0.000247105 if raw_sq_meters else 0
+                
                 ws_data.append({
                     "HUC-12 Watershed Name": props.get('name', 'Unknown'), 
-                    "Active Hazard Footprint (Acres)": round(props.get('hazard_acres', 0), 2)
+                    "Active Hazard Footprint (Acres)": round(acres, 2)
                 })
             
             df_ws = pd.DataFrame(ws_data).sort_values(by="Active Hazard Footprint (Acres)", ascending=False)
-            df_ws = df_ws[df_ws["Active Hazard Footprint (Acres)"] > 0] # Filter out empty watersheds
-
-            # Layout the Report
+            
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("Regional Vulnerability Table")
                 st.dataframe(df_ws, use_container_width=True, hide_index=True)
                 
-                # CSV Export
                 csv = df_ws.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="📥 Download Data as CSV",
@@ -245,16 +246,20 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 
             with c2:
                 st.subheader("Hazard Distribution by Basin")
-                chart = alt.Chart(df_ws).mark_bar(color='#ff7b00').encode(
-                    x=alt.X('Active Hazard Footprint (Acres):Q', title='Hazard Area (Acres)'),
-                    y=alt.Y('HUC-12 Watershed Name:N', sort='-x', title=None),
-                    tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)']
-                ).properties(height=400)
-                st.altair_chart(chart, use_container_width=True)
+                # Ensure chart works even if dataframe is entirely zeros
+                if df_ws['Active Hazard Footprint (Acres)'].sum() > 0:
+                    chart = alt.Chart(df_ws).mark_bar(color='#ff7b00').encode(
+                        x=alt.X('Active Hazard Footprint (Acres):Q', title='Hazard Area (Acres)'),
+                        y=alt.Y('HUC-12 Watershed Name:N', sort='-x', title=None),
+                        tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)']
+                    ).properties(height=400)
+                    st.altair_chart(chart, use_container_width=True)
+                else:
+                    st.success("No critical hazard zones detected under the current parameters.")
 
             st.markdown("---")
             st.info("""
             **Methodological Note:** This report utilizes the `reduceRegion` function to quantify the total acreage of 'The Deadly Combination' (Burn > 0.44 AND Slope > Threshold) within each USGS HUC-12 boundary. This output is designed to align with the sub-watershed targeting logic utilized by the USGS Post-Fire Debris Flow (PFDF) and Wildcat models.
             """)
     else:
-        st.info("Click 'Generate Quantitative Report' to calculate the spatial metrics for this specific timeframe.")
+        st.info("Toggle 'Generate Quantitative Report' to calculate the spatial metrics for this specific timeframe.")
