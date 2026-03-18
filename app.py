@@ -14,6 +14,13 @@ import altair as alt
 # ==========================================
 st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #1f2937; padding: 15px; border-radius: 5px; border: 1px solid #374151; }
+    </style>
+    """, unsafe_allow_html=True)
+
 # ==========================================
 # 2. DATA LOADERS & GEE INIT
 # ==========================================
@@ -220,7 +227,7 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
         st.info("Toggle 'Activate Spatial Modeling Engine' to render layers.")
 
 # ==========================================
-# PAGE 3: STATISTICAL REPORT (UPGRADED)
+# PAGE 3: STATISTICAL REPORT (INTERACTIVE)
 # ==========================================
 elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Statistical Analysis")
@@ -252,7 +259,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
-                # CRITICAL FIX: sharedInputs=True allows the Reducer to process 3 bands simultaneously
+                # sharedInputs=True allows multiple bands to be evaluated simultaneously
                 reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
@@ -296,6 +303,11 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     df_ws = pd.DataFrame(ws_data).sort_values(by="Est. Sediment Yield (m³)", ascending=False)
                     
                     st.subheader("Regional Vulnerability Map")
+                    
+                    # INTERACTIVE HIGHLIGHTING FEATURE
+                    huc_options = ["None"] + df_ws['HUC-12 Watershed Name'].tolist()
+                    selected_basin = st.selectbox("🔍 Highlight Specific Watershed on Map:", huc_options)
+                    
                     centroid = fire_subset.geometry.centroid.iloc[0]
                     m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
                     
@@ -304,6 +316,12 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     
                     folium.TileLayer(tiles=burn_mask.updateMask(burn_mask).getMapId({'palette':['#bd0026']})['tile_fetcher'].url_format, attr='GEE', name='Burn Scar', opacity=0.4).add_to(m3)
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Zones').add_to(m3)
+
+                    # Paint the selected basin in neon Cyan if requested
+                    if selected_basin != "None":
+                        highlighted_huc = huc12.filter(ee.Filter.eq('name', selected_basin))
+                        highlight_outline = ee.Image(0).mask(0).paint(highlighted_huc, 'cyan', 4)
+                        folium.TileLayer(tiles=highlight_outline.getMapId({'palette':['#00ffff']})['tile_fetcher'].url_format, attr='USGS', name='Highlighted Basin').add_to(m3)
 
                     folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m3)
                     st_folium(m3, use_container_width=True, height=500)
