@@ -5,6 +5,7 @@ import folium
 from streamlit_folium import st_folium
 import ee
 import json
+import requests
 from datetime import datetime, timedelta
 import altair as alt
 
@@ -37,6 +38,22 @@ def load_fire_perimeters():
         st.error("Shapefile not found. Please ensure the 'CA_Perimeters' folder is in the same directory.")
         return None
 
+@st.cache_data
+def fetch_dins_damage(incident_name):
+    # CAL FIRE DINS API for live infrastructure damage
+    url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
+    params = {
+        "where": f"INCIDENT_NAME = '{incident_name}' AND DAMAGE IN ('Destroyed', 'Major')",
+        "outFields": "DAMAGE, STRUCTURE_TYPE",
+        "returnCountOnly": "true",
+        "f": "json"
+    }
+    try:
+        response = requests.get(url, params=params).json()
+        return response.get('count', 0)
+    except:
+        return 0
+
 if 'ee_initialized' not in st.session_state:
     try:
         if "EARTHENGINE_JSON" in st.secrets:
@@ -64,9 +81,11 @@ if all_fires is not None:
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Global Model Parameters")
-    # Making parameters global ensures Page 2 and Page 3 stay perfectly in sync
     manual_baseline = st.sidebar.date_input("Pre-Fire Baseline Date", value=default_alarm_dt - timedelta(days=365))
-    recovery_months = st.sidebar.select_slider("Successional Window (Months Post-Fire)", options=[1, 6, 12, 18, 24], value=1)
+    recovery_months = st.sidebar.select_slider("Observation Window (Months Post-Fire)", options=[1, 6, 12, 18, 24], value=1)
+    
+    # NEW: Sensitivity Controls to fix the "Empty Map" issue
+    dnbr_limit = st.sidebar.slider("Burn Severity Threshold (dNBR)", 0.10, 0.70, 0.25, 0.05, help="Lower this value if the hazard area appears too small.")
     slope_limit = st.sidebar.slider("Critical Slope Threshold (Degrees)", 10, 45, 27)
 
 # ==========================================
@@ -76,13 +95,14 @@ if page == "1. Incident Briefing" and all_fires is not None:
     st.header(f"Incident Brief: {selected_name}")
     st.markdown("---")
     
-    m1, m2, m3, m4 = st.columns(4)
+    destroyed_count = fetch_dins_damage(selected_name)
     total_acres = (fire_subset.to_crs(epsg=3310).area.sum()) * 0.000247105
     
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
     m3.metric("Lead Agency", fire_subset['agency'].iloc[0] if 'agency' in fire_subset.columns else "CAL FIRE")
-    m4.metric("Status", "Contained / In Monitoring")
+    m4.metric("Structures Destroyed", f"{destroyed_count}" if destroyed_count > 0 else "No Data / 0", help="Live data via CAL FIRE DINS API")
 
     st.markdown("---")
 
@@ -97,12 +117,14 @@ if page == "1. Incident Briefing" and all_fires is not None:
 
     with col2:
         st.subheader("Historical Fire Fact Sheet")
-        ignore_cols = ['geometry', 'final_date', 'incident_n']
+        
+        # AGGRESSIVE GARBAGE FILTER: Hide messy backend GIS columns
+        garbage_cols = ['objectid', 'globalid', 'shape', 'geometry', 'incident_1', 'poly_datec', 'creationda', 'creator', 'editdate', 'editor', 'shape_leng', 'shape_area', 'irwinid']
         valid_data = {}
         for col in fire_subset.columns:
-            if col not in ignore_cols:
+            if str(col).lower() not in garbage_cols:
                 val = fire_subset[col].iloc[0]
-                if pd.notna(val) and val != '':
+                if pd.notna(val) and val != '' and val != 0:
                     clean_name = str(col).replace('_', ' ').title()
                     valid_data[clean_name] = str(val)
         
@@ -110,14 +132,13 @@ if page == "1. Incident Briefing" and all_fires is not None:
             df_facts = pd.DataFrame(list(valid_data.items()), columns=['Parameter', 'Recorded Data'])
             st.dataframe(df_facts, use_container_width=True, hide_index=True)
         else:
-            st.info("No extended metadata found in the shapefile for this incident.")
+            st.info("No extended metadata found in the shapefile.")
             
         st.markdown("---")
         st.info(f"""
         **Geomorphic Context:**
         The {selected_name} fire altered the hydrologic baseline of this region. 
         When high-severity canopy loss intersects with steep topography, the landscape loses its ability to act as a biological 'sponge.' 
-        This portal models the ensuing 'funnel' effect, identifying post-fire debris flow initiation zones.
         """)
 
 # ==========================================
@@ -133,7 +154,6 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     show_precip = st.sidebar.checkbox("Precipitation (NASA GPM)", value=False)
     show_risk = st.sidebar.checkbox("Hazard Intersection (Orange)", value=True)
     show_streams = st.sidebar.checkbox("Stream Routing (HydroSHEDS)", value=True)
-    show_infra = st.sidebar.checkbox("Road Vulnerability", value=True)
     
     run_analysis = st.toggle("Activate Spatial Modeling Engine", value=False)
 
@@ -147,46 +167,40 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 target_date = fire_start_ee.advance(recovery_months, 'month')
 
                 def get_nbr_median(date_obj):
-                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")\
-                        .filterBounds(area)\
-                        .filterDate(date_obj.advance(-2.5, 'month'), date_obj.advance(2.5, 'month'))\
-                        .median().clip(area).normalizedDifference(['B8', 'B12'])
+                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area).filterDate(date_obj.advance(-2.5, 'month'), date_obj.advance(2.5, 'month')).median().clip(area).normalizedDifference(['B8', 'B12'])
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
                 dem = ee.Image("USGS/SRTMGL1_003").clip(area)
                 slope = ee.Terrain.slope(dem)
                 hillshade = ee.Terrain.hillshade(dem)
 
-                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(0.44))
+                # Adjusted Hazard Mask using User-Defined dNBR Limit
+                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
                 
-                # Automated Peak Results
-                st.subheader("Automated Model Insights")
                 try:
                     precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().clip(area)
                     peak_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 100).getInfo().get('precipitation', 0)
                     hazard_acres = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 90).getInfo().get('nd', 0) * 0.000247105
                 except Exception:
-                    peak_rain = 0
-                    hazard_acres = 0
+                    peak_rain, hazard_acres = 0, 0
 
+                st.subheader("Automated Model Insights")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Active Hazard Area", f"{hazard_acres:,.1f} Acres", delta="Critical Zones", delta_color="inverse")
+                m1.metric("Active Hazard Area", f"{hazard_acres:,.1f} Acres", delta=f"> {dnbr_limit} dNBR", delta_color="inverse")
                 m2.metric("Peak Rainfall Intensity", f"{peak_rain:,.1f} mm", delta="During Window", delta_color="off")
                 m3.metric("Geomorphic Threshold", f"{slope_limit} Degrees", delta="User Defined", delta_color="off")
                 st.markdown("---")
 
-                # Map Rendering
                 centroid = fire_subset.geometry.centroid.iloc[0]
                 m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
                 
                 legend_html = f"""
-                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px;">
                 <b style="color:#2c3e50; font-size:14px;">Spatial Layers</b><br><hr style="margin: 4px 0;">
                 <i style="background:red; width:12px; height:12px; float:left; margin-right:8px; border:1px solid black;"></i> <span style="color:black;">Fire Perimeter</span><br>
                 <i style="background:#bd0026; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:black;">Severe Burn (dNBR)</span><br>
                 <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:black;">Hazard Initiation Zone</span><br>
-                <i style="background:#3498db; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:black;">HydroSHEDS Streams</span><br>
-                <i style="background:#2ecc71; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:black;">Vulnerable Roads</span>
+                <i style="background:#3498db; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:black;">HydroSHEDS Streams</span>
                 </div>"""
                 m.get_root().html.add_child(folium.Element(legend_html))
                 
@@ -201,10 +215,6 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 if show_streams:
                     streams = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), '#3498db', 2)
                     folium.TileLayer(tiles=streams.getMapId({'palette':['#3498db']})['tile_fetcher'].url_format, attr='HydroSHEDS', name='Streams').add_to(m)
-                if show_infra:
-                    roads = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), '#2ecc71', 1.5)
-                    vulnerable_roads = roads.updateMask(hazard_mask)
-                    folium.TileLayer(tiles=vulnerable_roads.getMapId({'palette':['#2ecc71']})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m)
 
                 folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 3}).add_to(m)
                 st_folium(m, use_container_width=True, height=650)
@@ -212,10 +222,10 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
             except Exception as e:
                 st.error(f"Geospatial calculation failed. Error details: {e}")
     else:
-        st.info("Toggle 'Activate Spatial Modeling Engine' in the sidebar to calculate and render the active map layers.")
+        st.info("Toggle 'Activate Spatial Modeling Engine' to render layers.")
 
 # ==========================================
-# PAGE 3: STATISTICAL REPORT
+# PAGE 3: STATISTICAL REPORT (UPGRADED)
 # ==========================================
 elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Statistical Analysis")
@@ -223,11 +233,9 @@ elif page == "3. Statistical Report" and all_fires is not None:
     run_stats = st.toggle("Generate Regional Vulnerability Map & Report", value=False)
 
     if run_stats:
-        with st.spinner("Extracting infrastructure data and reducing spatial arrays across HUC-12 boundaries..."):
+        with st.spinner("Extracting atmospheric data and reducing spatial arrays across HUC-12 boundaries..."):
             try:
                 area = ee.FeatureCollection(fire_subset.__geo_interface__)
-                
-                # Time Sync (using the global sidebar parameters)
                 pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
                 fire_start_ee = ee.Date(default_alarm_dt.strftime('%Y-%m-%d'))
                 target_date = fire_start_ee.advance(recovery_months, 'month')
@@ -237,20 +245,17 @@ elif page == "3. Statistical Report" and all_fires is not None:
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
                 slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
-                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(0.44))
+                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
                 
-                # Create reduction images
                 hazard_area_img = hazard_mask.multiply(ee.Image.pixelArea()).rename('hazard_area')
-                roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area)
-                vulnerable_roads = ee.Image(0).mask(0).paint(roads, 1).updateMask(hazard_mask).rename('road_pixels')
+                precip_img = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().rename('rainfall')
                 
-                combined_img = hazard_area_img.addBands(vulnerable_roads)
+                combined_img = hazard_area_img.addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
                 
-                # Reduce Regions for Statistical Output
                 reduced_stats = combined_img.reduceRegions(
                     collection=huc12,
-                    reducer=ee.Reducer.sum(),
+                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
                     scale=90
                 ).getInfo()
                 
@@ -258,86 +263,65 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 for f in reduced_stats['features']:
                     props = f['properties']
                     
-                    raw_sq_meters = props.get('hazard_area', 0)
+                    raw_sq_meters = props.get('hazard_area_sum', 0)
                     if raw_sq_meters is None: raw_sq_meters = 0
                     acres = raw_sq_meters * 0.000247105
                     
-                    road_pix_count = props.get('road_pixels', 0)
-                    if road_pix_count is None: road_pix_count = 0
-                    road_miles = (road_pix_count * 90) / 1609.34 # Approx conversion at 90m scale
+                    rain_mm = props.get('rainfall_mean', 0)
+                    if rain_mm is None: rain_mm = 0
                     
                     if acres > 0:
                         ws_data.append({
                             "HUC-12 Watershed Name": props.get('name', 'Unknown'), 
                             "Active Hazard Footprint (Acres)": round(acres, 2),
-                            "Vulnerable Roads (Miles)": round(road_miles, 2)
+                            "Mean Rainfall (mm)": round(rain_mm, 2)
                         })
                 
                 df_ws = pd.DataFrame(ws_data).sort_values(by="Active Hazard Footprint (Acres)", ascending=False)
                 
                 if df_ws.empty:
-                    st.success("No active hazard areas detected matching these thresholds. The landscape has stabilized.")
+                    st.success("No active hazard areas detected. Try lowering the dNBR threshold in the sidebar.")
                 else:
-                    # Top Row: Map
                     st.subheader("Regional Vulnerability Map")
                     
                     centroid = fire_subset.geometry.centroid.iloc[0]
                     m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB dark_matter')
                     
-                    # Add HUC-12 outlines
                     w_outline = ee.Image(0).mask(0).paint(huc12, 'purple', 2)
                     folium.TileLayer(tiles=w_outline.getMapId({'palette':['purple']})['tile_fetcher'].url_format, attr='USGS', name='Watersheds').add_to(m3)
-                    
-                    # Add specific hazard masks
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Zones').add_to(m3)
-                    
-                    # Highlight Vulnerable Infrastructure
-                    highlight_roads = ee.Image(0).mask(0).paint(roads, '#2ecc71', 2).updateMask(hazard_mask)
-                    folium.TileLayer(tiles=highlight_roads.getMapId({'palette':['#2ecc71']})['tile_fetcher'].url_format, attr='TIGER', name='Vulnerable Infrastructure').add_to(m3)
 
                     folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m3)
-                    
-                    legend3_html = f"""
-                    <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: #1f2937; border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px;">
-                    <b style="color:white; font-size:14px;">Vulnerability Map</b><br><hr style="margin: 4px 0; border-color: grey;">
-                    <i style="border: 1px solid purple; width:12px; height:2px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:white;">HUC-12 Boundaries</span><br>
-                    <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:8px; margin-top:2px;"></i> <span style="color:white;">Hazard Zones</span><br>
-                    <i style="background:#2ecc71; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:white;">Affected Roads</span>
-                    </div>"""
-                    m3.get_root().html.add_child(folium.Element(legend3_html))
-                    
                     st_folium(m3, use_container_width=True, height=500)
                     st.markdown("---")
 
-                    # Bottom Row: Table & Chart
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.subheader("Multivariate Decision Matrix")
+                        st.subheader("Debris Flow Trigger Matrix")
                         st.dataframe(df_ws, use_container_width=True, hide_index=True)
                         
                         csv = df_ws.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="Download Decision Matrix (CSV)",
-                            data=csv,
-                            file_name=f'{selected_name}_decision_matrix.csv',
-                            mime='text/csv',
-                        )
+                        st.download_button("Download Matrix (CSV)", data=csv, file_name=f'{selected_name}_trigger_matrix.csv', mime='text/csv')
                         
                     with c2:
-                        st.subheader("Infrastructure at Risk by Basin")
-                        chart = alt.Chart(df_ws).mark_bar(color='#2ecc71').encode(
-                            x=alt.X('Vulnerable Roads (Miles):Q', title='Miles of Affected Roads'),
-                            y=alt.Y('HUC-12 Watershed Name:N', sort='-x', title=None),
-                            tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)', 'Vulnerable Roads (Miles)']
-                        ).properties(height=300)
-                        st.altair_chart(chart, use_container_width=True)
+                        # Upgraded Chart: Scatter plot showing Hazard Area vs Rainfall
+                        st.subheader("Atmospheric Trigger Analysis")
+                        scatter = alt.Chart(df_ws).mark_circle(size=200, color='#3498db', opacity=0.8).encode(
+                            x=alt.X('Active Hazard Footprint (Acres):Q', title='Hazard Area (Acres)'),
+                            y=alt.Y('Mean Rainfall (mm):Q', title='Cumulative Rainfall (mm)'),
+                            tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)', 'Mean Rainfall (mm)']
+                        ).properties(height=350)
+                        
+                        # Add labels to the dots
+                        text = scatter.mark_text(align='left', baseline='middle', dx=15, color="white").encode(text='HUC-12 Watershed Name:N')
+                        st.altair_chart(scatter + text, use_container_width=True)
 
                 st.info("""
-                **Methodological Note:** This matrix integrates the TIGER/Line network to approximate the specific mileage of infrastructure trapped within active hazard zones, providing actionable intelligence for evacuation and resource staging.
+                **Analytical Note:** This scatter matrix identifies 'Trigger Zones.' Watersheds positioned in the top-right quadrant exhibit both critical geomorphic instability (high hazard area) and significant atmospheric loading (high rainfall), making them prime candidates for immediate debris flow monitoring.
                 """)
             
             except Exception as e:
-                st.error("Earth Engine Computation Timeout. Try adjusting your parameters or checking internet connectivity.")
+                st.error("Earth Engine Computation Timeout. Try adjusting your parameters.")
 
     else:
         st.info("Toggle 'Generate Regional Vulnerability Map & Report' to calculate spatial metrics.")
