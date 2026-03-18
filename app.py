@@ -241,8 +241,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
                 slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
                 
-                # CRITICAL UPDATE: Calculate General Burn Area in addition to Critical Hazard
-                burn_mask = dnbr.gt(0.1) # Any area with visible burn
+                burn_mask = dnbr.gt(0.1) 
                 burn_area_img = burn_mask.multiply(ee.Image.pixelArea()).rename('burn_area')
                 
                 hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
@@ -253,9 +252,10 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
+                # CRITICAL FIX: sharedInputs=True allows the Reducer to process 3 bands simultaneously
                 reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
-                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
+                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
                     scale=500,
                     tileScale=16
                 )
@@ -281,11 +281,8 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     rain_mm = props.get('rainfall_mean', 0)
                     if rain_mm is None: rain_mm = 0
                     
-                    # PROXY YIELD: Empirical Sediment Mobilization Estimate
-                    # Formula: Hazard Area (m^2) * Rainfall (m) * 0.6 (Post-fire yield coefficient)
                     sediment_m3 = (raw_haz_sqm * (rain_mm / 1000.0) * 0.6) if raw_haz_sqm > 0 else 0
                     
-                    # INCLUSION UPDATE: Assess ANY watershed that got burned, even if critical hazard is 0
                     if total_burn_acres > 1:
                         ws_data.append({
                             "HUC-12 Watershed Name": props.get('name', 'Unknown'), 
@@ -305,7 +302,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     w_outline = ee.Image(0).mask(0).paint(huc12, 'purple', 2)
                     folium.TileLayer(tiles=w_outline.getMapId({'palette':['purple']})['tile_fetcher'].url_format, attr='USGS', name='Watersheds').add_to(m3)
                     
-                    # Add burn scar to prove area was assessed, then layer hazard on top
                     folium.TileLayer(tiles=burn_mask.updateMask(burn_mask).getMapId({'palette':['#bd0026']})['tile_fetcher'].url_format, attr='GEE', name='Burn Scar', opacity=0.4).add_to(m3)
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Zones').add_to(m3)
 
@@ -341,4 +337,3 @@ elif page == "3. Statistical Report" and all_fires is not None:
 
     else:
         st.info("Toggle 'Generate Regional Vulnerability Map & Report' to calculate spatial metrics.")
-        
