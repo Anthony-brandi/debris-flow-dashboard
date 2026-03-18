@@ -12,7 +12,6 @@ import altair as alt
 # ==========================================
 # 1. SYSTEM CONFIGURATION & UI
 # ==========================================
-# Removed the forced dark-mode CSS to allow native Light/Dark theme switching
 st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 
 # ==========================================
@@ -35,11 +34,8 @@ def load_fire_perimeters():
 @st.cache_data
 def fetch_dins_damage(incident_name):
     url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
-    
-    # Clean the name to improve API match rate
     clean_name = str(incident_name).strip().upper().replace(' FIRE', '')
     
-    # Broadened damage categories for more accurate impact reporting
     params = {
         "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major', 'Minor', 'Affected')",
         "outFields": "*",
@@ -112,7 +108,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
     with col1:
         st.subheader("Perimeter Overview")
         centroid = fire_subset.geometry.centroid.iloc[0]
-        # Using a neutral basemap that looks good in Light and Dark mode
         m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
         folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': '#bd0026', 'weight': 2, 'fillOpacity': 0.4}).add_to(m)
         st_folium(m, use_container_width=True, height=500)
@@ -194,7 +189,6 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 centroid = fire_subset.geometry.centroid.iloc[0]
                 m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
                 
-                # Legend updated with neutral styling for light/dark mode compatibility
                 legend_html = f"""
                 <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: rgba(255, 255, 255, 0.9); border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px;">
                 <b style="color:#2c3e50; font-size:14px;">Spatial Layers</b><br><hr style="margin: 4px 0;">
@@ -226,7 +220,7 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
         st.info("Toggle 'Activate Spatial Modeling Engine' to render layers.")
 
 # ==========================================
-# PAGE 3: STATISTICAL REPORT
+# PAGE 3: STATISTICAL REPORT (UPGRADED)
 # ==========================================
 elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Statistical Analysis")
@@ -246,12 +240,17 @@ elif page == "3. Statistical Report" and all_fires is not None:
 
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
                 slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
-                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
                 
+                # CRITICAL UPDATE: Calculate General Burn Area in addition to Critical Hazard
+                burn_mask = dnbr.gt(0.1) # Any area with visible burn
+                burn_area_img = burn_mask.multiply(ee.Image.pixelArea()).rename('burn_area')
+                
+                hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
                 hazard_area_img = hazard_mask.multiply(ee.Image.pixelArea()).rename('hazard_area')
+                
                 precip_img = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().rename('rainfall')
                 
-                combined_img = hazard_area_img.addBands(precip_img)
+                combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
                 reduced_stats_fc = combined_img.reduceRegions(
@@ -271,37 +270,43 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 for f in reduced_stats['features']:
                     props = f['properties']
                     
-                    raw_sq_meters = props.get('hazard_area_sum', 0)
-                    if raw_sq_meters is None: raw_sq_meters = 0
-                    acres = raw_sq_meters * 0.000247105
+                    raw_burn_sqm = props.get('burn_area_sum', 0)
+                    if raw_burn_sqm is None: raw_burn_sqm = 0
+                    total_burn_acres = raw_burn_sqm * 0.000247105
+                    
+                    raw_haz_sqm = props.get('hazard_area_sum', 0)
+                    if raw_haz_sqm is None: raw_haz_sqm = 0
+                    hazard_acres = raw_haz_sqm * 0.000247105
                     
                     rain_mm = props.get('rainfall_mean', 0)
                     if rain_mm is None: rain_mm = 0
                     
-                    if acres > 0:
+                    # PROXY YIELD: Empirical Sediment Mobilization Estimate
+                    # Formula: Hazard Area (m^2) * Rainfall (m) * 0.6 (Post-fire yield coefficient)
+                    sediment_m3 = (raw_haz_sqm * (rain_mm / 1000.0) * 0.6) if raw_haz_sqm > 0 else 0
+                    
+                    # INCLUSION UPDATE: Assess ANY watershed that got burned, even if critical hazard is 0
+                    if total_burn_acres > 1:
                         ws_data.append({
                             "HUC-12 Watershed Name": props.get('name', 'Unknown'), 
-                            "Active Hazard Footprint (Acres)": round(acres, 2),
-                            "Mean Rainfall (mm)": round(rain_mm, 2)
+                            "Total Burned Area (Acres)": round(total_burn_acres, 2),
+                            "Critical Hazard (Acres)": round(hazard_acres, 2),
+                            "Mean Rainfall (mm)": round(rain_mm, 2),
+                            "Est. Sediment Yield (m³)": round(sediment_m3, 1)
                         })
                 
-                # CRITICAL FIX: Safe DataFrame creation to prevent the KeyError crash
                 if len(ws_data) > 0:
-                    df_ws = pd.DataFrame(ws_data).sort_values(by="Active Hazard Footprint (Acres)", ascending=False)
-                else:
-                    df_ws = pd.DataFrame(columns=["HUC-12 Watershed Name", "Active Hazard Footprint (Acres)", "Mean Rainfall (mm)"])
-                
-                if df_ws.empty:
-                    st.success("No active hazard areas detected. The landscape has stabilized, or the model thresholds are too strict.")
-                else:
-                    st.subheader("Regional Vulnerability Map")
+                    df_ws = pd.DataFrame(ws_data).sort_values(by="Est. Sediment Yield (m³)", ascending=False)
                     
+                    st.subheader("Regional Vulnerability Map")
                     centroid = fire_subset.geometry.centroid.iloc[0]
-                    # Using positron for clean light/dark mode map viewing
                     m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
                     
                     w_outline = ee.Image(0).mask(0).paint(huc12, 'purple', 2)
                     folium.TileLayer(tiles=w_outline.getMapId({'palette':['purple']})['tile_fetcher'].url_format, attr='USGS', name='Watersheds').add_to(m3)
+                    
+                    # Add burn scar to prove area was assessed, then layer hazard on top
+                    folium.TileLayer(tiles=burn_mask.updateMask(burn_mask).getMapId({'palette':['#bd0026']})['tile_fetcher'].url_format, attr='GEE', name='Burn Scar', opacity=0.4).add_to(m3)
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Zones').add_to(m3)
 
                     folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': 'transparent', 'weight': 2}).add_to(m3)
@@ -317,24 +322,23 @@ elif page == "3. Statistical Report" and all_fires is not None:
                         st.download_button("Download Matrix (CSV)", data=csv, file_name=f'{selected_name}_trigger_matrix.csv', mime='text/csv')
                         
                     with c2:
-                        st.subheader("Atmospheric Trigger Analysis")
-                        scatter = alt.Chart(df_ws).mark_circle(size=200, color='#3498db', opacity=0.8).encode(
-                            x=alt.X('Active Hazard Footprint (Acres):Q', title='Hazard Area (Acres)'),
-                            y=alt.Y('Mean Rainfall (mm):Q', title='Cumulative Rainfall (mm)'),
-                            tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)', 'Mean Rainfall (mm)']
+                        st.subheader("Sediment Mobilization Risk")
+                        bar_chart = alt.Chart(df_ws).mark_bar(color='#ff7b00').encode(
+                            x=alt.X('Est\. Sediment Yield (m³):Q', title='Potential Debris Yield (Cubic Meters)'),
+                            y=alt.Y('HUC-12 Watershed Name:N', sort='-x', title=None),
+                            tooltip=['HUC-12 Watershed Name', 'Total Burned Area (Acres)', 'Est. Sediment Yield (m³)']
                         ).properties(height=350)
-                        
-                        # Set text color conditionally or rely on Altair's default which handles dark/light decently
-                        text = scatter.mark_text(align='left', baseline='middle', dx=15).encode(text='HUC-12 Watershed Name:N')
-                        st.altair_chart(scatter + text, use_container_width=True)
+                        st.altair_chart(bar_chart, use_container_width=True)
 
-                st.info("""
-                **Analytical Note:** This scatter matrix identifies Trigger Zones. Watersheds positioned in the top-right quadrant exhibit both critical geomorphic instability (high hazard area) and significant atmospheric loading (high rainfall), making them prime candidates for immediate debris flow monitoring.
-                """)
+                    st.info("""
+                    **Analytical Note:** The table above assesses every watershed impacted by the fire perimeter. The 'Estimated Sediment Yield' metric utilizes an empirical proxy calculation (Critical Hazard Area × Rainfall Depth × 0.6 Post-Fire Runoff Coefficient) to identify the specific basins likely to generate the largest volume of debris at peak flow.
+                    """)
+                else:
+                    st.success("The model completed successfully. However, the analysis found absolutely 0 acres of burned terrain within this perimeter under the current date filters. Check your Pre-Fire Baseline.")
             
             except Exception as e:
-                # We retain this just in case the API genuinely times out on massive polygons
                 st.error(f"Earth Engine Computation Timeout or Network Error. Please try adjusting your parameters. Details: {e}")
 
     else:
         st.info("Toggle 'Generate Regional Vulnerability Map & Report' to calculate spatial metrics.")
+        
