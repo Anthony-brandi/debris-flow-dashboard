@@ -12,14 +12,8 @@ import altair as alt
 # ==========================================
 # 1. SYSTEM CONFIGURATION & UI
 # ==========================================
+# Removed the forced dark-mode CSS to allow native Light/Dark theme switching
 st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
-
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #1f2937; padding: 15px; border-radius: 5px; border: 1px solid #374151; }
-    </style>
-    """, unsafe_allow_html=True)
 
 # ==========================================
 # 2. DATA LOADERS & GEE INIT
@@ -41,10 +35,13 @@ def load_fire_perimeters():
 @st.cache_data
 def fetch_dins_damage(incident_name):
     url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
-    clean_name = str(incident_name).strip().upper()
     
+    # Clean the name to improve API match rate
+    clean_name = str(incident_name).strip().upper().replace(' FIRE', '')
+    
+    # Broadened damage categories for more accurate impact reporting
     params = {
-        "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major')",
+        "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major', 'Minor', 'Affected')",
         "outFields": "*",
         "returnCountOnly": "true",
         "f": "json"
@@ -95,7 +92,7 @@ if page == "1. Incident Briefing" and all_fires is not None:
     st.header(f"Incident Brief: {selected_name}")
     st.markdown("---")
     
-    destroyed_count = fetch_dins_damage(selected_name)
+    impacted_count = fetch_dins_damage(selected_name)
     total_acres = (fire_subset.to_crs(epsg=3310).area.sum()) * 0.000247105
     
     m1, m2, m3, m4 = st.columns(4)
@@ -103,10 +100,10 @@ if page == "1. Incident Briefing" and all_fires is not None:
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
     m3.metric("Lead Agency", fire_subset['agency'].iloc[0] if 'agency' in fire_subset.columns else "CAL FIRE")
     
-    if destroyed_count > 0:
-        m4.metric("Structures Destroyed", f"{destroyed_count}")
+    if impacted_count > 0:
+        m4.metric("Structures Impacted", f"{impacted_count}")
     else:
-        m4.metric("Structures Destroyed", "0 (Or Missing DINS Data)")
+        m4.metric("Structures Impacted", "0 (Or Missing DINS Data)")
 
     st.markdown("---")
 
@@ -115,7 +112,8 @@ if page == "1. Incident Briefing" and all_fires is not None:
     with col1:
         st.subheader("Perimeter Overview")
         centroid = fire_subset.geometry.centroid.iloc[0]
-        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB dark_matter')
+        # Using a neutral basemap that looks good in Light and Dark mode
+        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
         folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'fillColor': '#bd0026', 'weight': 2, 'fillOpacity': 0.4}).add_to(m)
         st_folium(m, use_container_width=True, height=500)
 
@@ -196,13 +194,14 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 centroid = fire_subset.geometry.centroid.iloc[0]
                 m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
                 
+                # Legend updated with neutral styling for light/dark mode compatibility
                 legend_html = f"""
-                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px;">
+                <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: rgba(255, 255, 255, 0.9); border:1px solid grey; z-index:9999; font-size:13px; padding: 12px; border-radius: 4px;">
                 <b style="color:#2c3e50; font-size:14px;">Spatial Layers</b><br><hr style="margin: 4px 0;">
-                <i style="background:red; width:12px; height:12px; float:left; margin-right:8px; border:1px solid black;"></i> <span style="color:black;">Fire Perimeter</span><br>
-                <i style="background:#bd0026; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:black;">Severe Burn (dNBR)</span><br>
-                <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:black;">Hazard Initiation Zone</span><br>
-                <i style="background:#3498db; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:black;">HydroSHEDS Streams</span>
+                <i style="background:red; width:12px; height:12px; float:left; margin-right:8px; border:1px solid black;"></i> <span style="color:#2c3e50;">Fire Perimeter</span><br>
+                <i style="background:#bd0026; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:#2c3e50;">Severe Burn (dNBR)</span><br>
+                <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:8px;"></i> <span style="color:#2c3e50;">Hazard Initiation Zone</span><br>
+                <i style="background:#3498db; width:12px; height:3px; float:left; margin-right:8px; margin-top:5px;"></i> <span style="color:#2c3e50;">HydroSHEDS Streams</span>
                 </div>"""
                 m.get_root().html.add_child(folium.Element(legend_html))
                 
@@ -253,11 +252,8 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 precip_img = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().rename('rainfall')
                 
                 combined_img = hazard_area_img.addBands(precip_img)
-                
-                # OPTIMIZATION: Tightly bound the HUC12 search to just the fire geometry to save memory
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
-                # CRITICAL FIX: scale=500 and tileScale=16 prevents the GEE Timeout
                 reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
@@ -289,15 +285,20 @@ elif page == "3. Statistical Report" and all_fires is not None:
                             "Mean Rainfall (mm)": round(rain_mm, 2)
                         })
                 
-                df_ws = pd.DataFrame(ws_data).sort_values(by="Active Hazard Footprint (Acres)", ascending=False)
+                # CRITICAL FIX: Safe DataFrame creation to prevent the KeyError crash
+                if len(ws_data) > 0:
+                    df_ws = pd.DataFrame(ws_data).sort_values(by="Active Hazard Footprint (Acres)", ascending=False)
+                else:
+                    df_ws = pd.DataFrame(columns=["HUC-12 Watershed Name", "Active Hazard Footprint (Acres)", "Mean Rainfall (mm)"])
                 
                 if df_ws.empty:
-                    st.success("No active hazard areas detected. Try lowering the dNBR threshold in the sidebar.")
+                    st.success("No active hazard areas detected. The landscape has stabilized, or the model thresholds are too strict.")
                 else:
                     st.subheader("Regional Vulnerability Map")
                     
                     centroid = fire_subset.geometry.centroid.iloc[0]
-                    m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB dark_matter')
+                    # Using positron for clean light/dark mode map viewing
+                    m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
                     
                     w_outline = ee.Image(0).mask(0).paint(huc12, 'purple', 2)
                     folium.TileLayer(tiles=w_outline.getMapId({'palette':['purple']})['tile_fetcher'].url_format, attr='USGS', name='Watersheds').add_to(m3)
@@ -323,7 +324,8 @@ elif page == "3. Statistical Report" and all_fires is not None:
                             tooltip=['HUC-12 Watershed Name', 'Active Hazard Footprint (Acres)', 'Mean Rainfall (mm)']
                         ).properties(height=350)
                         
-                        text = scatter.mark_text(align='left', baseline='middle', dx=15, color="white").encode(text='HUC-12 Watershed Name:N')
+                        # Set text color conditionally or rely on Altair's default which handles dark/light decently
+                        text = scatter.mark_text(align='left', baseline='middle', dx=15).encode(text='HUC-12 Watershed Name:N')
                         st.altair_chart(scatter + text, use_container_width=True)
 
                 st.info("""
@@ -331,7 +333,8 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 """)
             
             except Exception as e:
-                st.error(f"Earth Engine Computation Timeout. Error details: {e}")
+                # We retain this just in case the API genuinely times out on massive polygons
+                st.error(f"Earth Engine Computation Timeout or Network Error. Please try adjusting your parameters. Details: {e}")
 
     else:
         st.info("Toggle 'Generate Regional Vulnerability Map & Report' to calculate spatial metrics.")
