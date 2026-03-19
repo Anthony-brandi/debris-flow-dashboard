@@ -181,10 +181,17 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 
                 try:
                     precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().clip(area)
-                    peak_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 250).getInfo().get('precipitation', 0)
-                    hazard_acres = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 250).getInfo().get('nd', 0) * 0.000247105
+                    
+                    # Extract raw values from Earth Engine
+                    raw_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 250).getInfo().get('precipitation', 0)
+                    raw_hazard = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 250).getInfo().get('nd', 0)
+                    
+                    # The Safety Net: Force NoneType to 0.0 so the formatting doesn't crash
+                    peak_rain = float(raw_rain) if raw_rain is not None else 0.0
+                    hazard_acres = float(raw_hazard) * 0.000247105 if raw_hazard is not None else 0.0
+                    
                 except Exception:
-                    peak_rain, hazard_acres = 0, 0
+                    peak_rain, hazard_acres = 0.0, 0.0
 
                 st.subheader("Automated Model Insights")
                 m1, m2, m3 = st.columns(3)
