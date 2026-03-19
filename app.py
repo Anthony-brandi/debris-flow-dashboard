@@ -22,7 +22,6 @@ st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 @st.cache_data
 def load_fire_perimeters():
     try:
-        # 1. Handle Mac naming quirks by checking what the file is actually called
         possible_names = ['Master_Fire_Dataset.zip', 'Master_Fire_Dataset.geojson.zip', 'Master_Fire_Dataset.zip.zip']
         actual_zip = next((name for name in possible_names if os.path.exists(name)), None)
         
@@ -30,16 +29,12 @@ def load_fire_perimeters():
             st.error("Could not find the zip file in GitHub. Please check the exact file name in your repository.")
             return None
 
-        # 2. Unzip the file directly in the Streamlit cloud environment
         with zipfile.ZipFile(actual_zip, 'r') as zip_ref:
-            # Find the exact name of the GeoJSON inside the zip folder
             geojson_filename = [f for f in zip_ref.namelist() if f.endswith('.geojson')][0]
             zip_ref.extract(geojson_filename)
             
-        # 3. Read the extracted file natively (no weird zip:// syntax required)
         fires = gpd.read_file(geojson_filename)
         fires['final_date'] = pd.to_datetime(fires['final_date'])
-        
         return fires
         
     except Exception as e:
@@ -48,7 +43,6 @@ def load_fire_perimeters():
 
 @st.cache_data
 def fetch_dins_damage(incident_name):
-    # This is the function that went missing! It pulls real-time building damage from CAL FIRE.
     url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
     clean_name = str(incident_name).strip().upper().replace(' FIRE', '')
     
@@ -129,6 +123,21 @@ if page == "1. Incident Briefing" and all_fires is not None:
         st_folium(m, use_container_width=True, height=500)
 
     with col2:
+        st.subheader("Historical Fire Fact Sheet")
+        garbage_cols = ['objectid', 'globalid', 'shape', 'geometry', 'incident_1', 'poly_datec', 'creationda', 'creator', 'editdate', 'editor', 'shape_leng', 'shape_area', 'irwinid']
+        valid_data = {}
+        for col in fire_subset.columns:
+            if str(col).lower() not in garbage_cols:
+                val = fire_subset[col].iloc[0]
+                if pd.notna(val) and val != '' and val != 0:
+                    clean_name = str(col).replace('_', ' ').title()
+                    valid_data[clean_name] = str(val)
+        
+        if valid_data:
+            df_facts = pd.DataFrame(list(valid_data.items()), columns=['Parameter', 'Recorded Data'])
+            st.dataframe(df_facts, use_container_width=True, hide_index=True)
+            
+        st.markdown("---")
         st.info(f"""
         **Geomorphic Context:**
         The {selected_name} fire altered the hydrologic baseline of this region. 
@@ -226,7 +235,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
     run_stats = st.toggle("Generate Regional Vulnerability Map & Report", value=False)
 
     if run_stats:
-        with st.spinner("Extracting atmospheric data and reducing spatial arrays across HUC-12 boundaries..."):
+        with st.spinner("Extracting atmospheric data, soil properties, and reducing spatial arrays..."):
             try:
                 area = ee.FeatureCollection(fire_subset.__geo_interface__)
                 pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
@@ -239,6 +248,13 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 dnbr = get_nbr_median(pre_date).subtract(get_nbr_median(target_date))
                 slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003")).clip(area)
                 
+                # Retrieve USDA Soil Texture and remap into K-Factor percentages
+                soil_texture = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area)
+                k_factor = soil_texture.remap(
+                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 
+                    [15, 25, 15, 30, 35, 20, 30, 40, 25, 45, 10, 5]
+                ).divide(100.0).rename('k_factor')
+                
                 burn_mask = dnbr.gt(0.1) 
                 burn_area_img = burn_mask.multiply(ee.Image.pixelArea()).rename('burn_area')
                 
@@ -247,12 +263,12 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 
                 precip_img = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().rename('rainfall')
                 
-                combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img)
+                combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img).addBands(k_factor)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
                 reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
-                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
+                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
                     scale=500,
                     tileScale=16
                 )
@@ -278,7 +294,10 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     rain_mm = props.get('rainfall_mean', 0)
                     if rain_mm is None: rain_mm = 0
                     
-                    sediment_m3 = (raw_haz_sqm * (rain_mm / 1000.0) * 0.6) if raw_haz_sqm > 0 else 0
+                    mean_k = props.get('k_factor_mean', 0.25)
+                    if mean_k is None: mean_k = 0.25
+                    
+                    sediment_m3 = (raw_haz_sqm * (rain_mm / 1000.0) * mean_k) if raw_haz_sqm > 0 else 0
                     
                     if total_burn_acres > 1:
                         ws_data.append({
@@ -286,6 +305,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
                             "Total Burned Area (Acres)": round(total_burn_acres, 2),
                             "Critical Hazard (Acres)": round(hazard_acres, 2),
                             "Mean Rainfall (mm)": round(rain_mm, 2),
+                            "Mean K-Factor": round(mean_k, 3),
                             "Est. Sediment Yield (m³)": round(sediment_m3, 1)
                         })
                 
@@ -295,7 +315,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     st.subheader("Regional Vulnerability Map")
                     
                     huc_options = ["None"] + df_ws['HUC-12 Watershed Name'].tolist()
-                    selected_basin = st.selectbox("🔍 Highlight Specific Watershed on Map:", huc_options)
+                    selected_basin = st.selectbox("Highlight Specific Watershed on Map:", huc_options)
                     
                     centroid = fire_subset.geometry.centroid.iloc[0]
                     m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
@@ -328,15 +348,15 @@ elif page == "3. Statistical Report" and all_fires is not None:
                         bar_chart = alt.Chart(df_ws).mark_bar(color='#ff7b00').encode(
                             x=alt.X('Est\. Sediment Yield (m³):Q', title='Potential Debris Yield (Cubic Meters)'),
                             y=alt.Y('HUC-12 Watershed Name:N', sort='-x', title=None),
-                            tooltip=['HUC-12 Watershed Name', 'Total Burned Area (Acres)', 'Est. Sediment Yield (m³)']
+                            tooltip=['HUC-12 Watershed Name', 'Total Burned Area (Acres)', 'Mean K-Factor', 'Est. Sediment Yield (m³)']
                         ).properties(height=350)
                         st.altair_chart(bar_chart, use_container_width=True)
 
                     st.info("""
-                    **Analytical Note:** The table above assesses every watershed impacted by the fire perimeter. The 'Estimated Sediment Yield' metric utilizes an empirical proxy calculation (Critical Hazard Area × Rainfall Depth × 0.6 Post-Fire Runoff Coefficient) to identify the specific basins likely to generate the largest volume of debris at peak flow.
+                    **Analytical Note:** The table above assesses every watershed impacted by the fire perimeter. The 'Estimated Sediment Yield' metric utilizes a dynamic empirical proxy (Critical Hazard Area × Rainfall Depth × Local K-Factor). The K-Factor erodibility is generated by extracting and remapping OpenLandMap USDA soil texture classifications across the specific basin.
                     """)
                 else:
-                    st.success("The model completed successfully. However, the analysis found absolutely 0 acres of burned terrain within this perimeter under the current date filters. Check your Pre-Fire Baseline.")
+                    st.success("The model completed successfully. However, the analysis found 0 acres of burned terrain within this perimeter under the current date filters. Check your Pre-Fire Baseline.")
             
             except Exception as e:
                 st.error(f"Earth Engine Computation Timeout or Network Error. Please try adjusting your parameters. Details: {e}")
