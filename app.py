@@ -273,9 +273,9 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img).addBands(k_factor)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
-                reduced_stats_fc = combined_img.reduceRegions(
+               reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
-                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=False),
+                    reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
                     scale=500,
                     tileScale=16
                 )
