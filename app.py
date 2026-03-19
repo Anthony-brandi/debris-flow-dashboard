@@ -84,27 +84,25 @@ if page == "1. Incident Briefing" and all_fires is not None:
     m1, m2, m3 = st.columns(3)
     m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
-    m3.metric("Verified Structures Impacted", f"{impacted_count}")
+    m3.metric("Structures Destroyed (CAL FIRE)", f"{impacted_count}")
 
     st.markdown("---")
 
     col1, col2 = st.columns([2, 1])
     with col1:
         centroid = fire_subset.geometry.centroid.iloc[0]
-        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
-        folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'weight': 2, 'fillOpacity': 0.1}).add_to(m)
+        m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB dark_matter')
+        folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': '#ff4b4b', 'weight': 2, 'fillOpacity': 0.1}).add_to(m)
         st_folium(m, use_container_width=True, height=500)
     with col2:
         st.subheader("Vulnerability Summary")
-        st.info(f"""
-        **The Hazard Logic:**
-        This dashboard identifies debris flow risk by intersecting three critical variables:
-        1. **Burn Severity:** Areas where fire destroyed the root systems and organic soil cover.
-        2. **Topography:** Slopes steeper than {slope_limit}° where gravity accelerates debris.
-        3. **Soil Type:** High K-Factor regions where the earth is naturally prone to detaching.
-        """)
+        st.markdown(f"The **{selected_name}** incident represents a high-risk geomorphic environment. Debris flows here are driven by the intersection of three factors:")
+        st.write("- **Seal:** Hydrophobic soils from severe burn.")
+        st.write(f"- **Gravity:** Slopes exceeding {slope_limit} degrees.")
+        st.write("- **Source:** High erodibility (K-Factor) sediment supply.")
+        
         if selected_name == "DIXIE":
-            st.warning("Case Study: The Dixie fire involved massive infrastructure loss. Note the interaction between steep canyons and the Atmospheric River event in late 2021.")
+            st.warning("Dixie Fire Case Study: Note the extreme topography around the Feather River Canyon which significantly amplifies sediment mobilization.")
 
 # ==========================================
 # PAGE 2: INTERACTIVE ANALYSIS
@@ -114,58 +112,63 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("Layer Toggles")
-    show_k = st.sidebar.checkbox("Soil Erodibility (K-Factor)", value=True)
+    show_k = st.sidebar.checkbox("Soil Erodibility (K-Factor Heatmap)", value=True)
     show_recovery = st.sidebar.checkbox("Burn Severity (dNBR)", value=True)
-    show_risk = st.sidebar.checkbox("Hazard Intersection (Orange)", value=True)
-    show_streams = st.sidebar.checkbox("Stream Networks", value=True)
-    show_roads = st.sidebar.checkbox("Major Roads (TIGER)", value=True)
+    show_risk = st.sidebar.checkbox("Hazard Intersection (ORANGE)", value=True)
+    show_streams = st.sidebar.checkbox("Hydrologic Networks (Blue)", value=True)
+    show_roads = st.sidebar.checkbox("Major Infrastructure (White)", value=True)
     
     run_analysis = st.toggle("Activate Spatial Modeling Engine", value=True)
 
     if run_analysis:
-        with st.spinner("Rendering complex spatial layers..."):
+        with st.spinner("Crunching multispectral and topographic data..."):
             area = ee.FeatureCollection(fire_subset.__geo_interface__)
             pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
             fire_start = ee.Date(default_alarm_dt.strftime('%Y-%m-%d'))
             target_date = fire_start.advance(recovery_months, 'month')
 
-            # Layers
+            # --- Calculation Engine ---
             def get_nbr(d): return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area).filterDate(d.advance(-2, 'month'), d.advance(2, 'month')).median().clip(area).normalizedDifference(['B8', 'B12'])
             dnbr = get_nbr(pre_date).subtract(get_nbr(target_date))
-            slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003").clip(area))
+            dem = ee.Image("USGS/SRTMGL1_003").clip(area)
+            slope = ee.Terrain.slope(dem)
+            
+            # K-Factor logic
             soil = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area)
             k_factor = soil.remap([1,2,3,4,5,6,7,8,9,10,11,12], [15,25,15,30,35,20,30,40,25,45,10,5]).divide(100.0)
+            
             hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
             streams = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 2)
             roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area)
 
+            # --- Map Assembly ---
             centroid = fire_subset.geometry.centroid.iloc[0]
             m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
             
-            # Layer Legend
+            # Static Legend
             legend_html = f"""
-            <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: rgba(255, 255, 255, 0.9); border:2px solid black; z-index:9999; font-size:12px; padding: 10px;">
-            <b>Map Legend</b><br>
-            <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:5px;"></i> Hazard Intersection<br>
-            <i style="background:#bd0026; width:12px; height:12px; float:left; margin-right:5px;"></i> Burn Scar (Severe)<br>
-            <i style="background:#08589e; width:12px; height:12px; float:left; margin-right:5px;"></i> High Soil Erodibility<br>
-            <i style="background:#3498db; width:12px; height:3px; float:left; margin-right:5px; margin-top:5px;"></i> Stream Flow<br>
-            <i style="background:white; border:1px solid black; width:12px; height:2px; float:left; margin-right:5px; margin-top:5px;"></i> TIGER Roads
+            <div style="position: fixed; bottom: 50px; left: 50px; width: 240px; background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
+            <b style="font-size:14px;">Risk Legend</b><br>
+            <i style="background:#ff7b00; width:15px; height:15px; float:left; margin-right:8px; border:1px solid black;"></i> Hazard Intersection<br>
+            <i style="background:#bd0026; width:15px; height:15px; float:left; margin-right:8px;"></i> Severe Burn Area<br>
+            <i style="background:#8c510a; width:15px; height:15px; float:left; margin-right:8px;"></i> High Soil Erodibility<br>
+            <i style="background:#00d4ff; width:15px; height:3px; float:left; margin-right:8px; margin-top:6px;"></i> Surface Water Path<br>
+            <i style="background:white; border:1px solid black; width:15px; height:2px; float:left; margin-right:8px; margin-top:6px;"></i> Infrastructure (Roads)
             </div>"""
             m.get_root().html.add_child(folium.Element(legend_html))
 
             if show_k:
-                folium.TileLayer(tiles=k_factor.getMapId({'min': 0.1, 'max': 0.45, 'palette': ['#f7fcf0','#e0f3db','#ccebc5','#a8ddb5','#7bccc4','#4eb3d3','#2b8cbe','#08589e']})['tile_fetcher'].url_format, attr='OpenLandMap', name='Soil', opacity=0.4).add_to(m)
+                folium.TileLayer(tiles=k_factor.getMapId({'min': 0.1, 'max': 0.45, 'palette': ['#f6e8c3','#dfc27d','#bf812d','#8c510a']})['tile_fetcher'].url_format, attr='OpenLandMap', name='Soil Stability', opacity=0.5).add_to(m)
             if show_recovery:
-                folium.TileLayer(tiles=dnbr.updateMask(dnbr.gt(0.2)).getMapId({'min': 0.2, 'max': 0.6, 'palette': ['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']})['tile_fetcher'].url_format, attr='S2', name='Burn', opacity=0.6).add_to(m)
+                folium.TileLayer(tiles=dnbr.updateMask(dnbr.gt(0.2)).getMapId({'min': 0.2, 'max': 0.6, 'palette': ['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']})['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.7).add_to(m)
             if show_risk:
-                folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard').add_to(m)
+                folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Intersection').add_to(m)
             if show_streams:
-                folium.TileLayer(tiles=streams.getMapId({'palette':['#3498db']})['tile_fetcher'].url_format, attr='Hydro', name='Streams').add_to(m)
+                folium.TileLayer(tiles=streams.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro', name='Flow Paths').add_to(m)
             if show_roads:
-                folium.GeoJson(roads.getInfo(), style_function=lambda x: {'color': 'white', 'weight': 1.5, 'opacity': 0.8}, name='Roads').add_to(m)
+                folium.GeoJson(roads.getInfo(), style_function=lambda x: {'color': 'white', 'weight': 1.5, 'opacity': 0.8}, name='Infrastructure').add_to(m)
 
-            st_folium(m, use_container_width=True, height=700)
+            st_folium(m, use_container_width=True, height=750)
 
 # ==========================================
 # PAGE 3: STATISTICAL REPORT
@@ -174,7 +177,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Statistical Analysis")
     run_stats = st.toggle("Generate Risk Matrix", value=True)
     if run_stats:
-        with st.spinner("Extracting basin-level metrics..."):
+        with st.spinner("Reducing basin arrays..."):
             area = ee.FeatureCollection(fire_subset.__geo_interface__)
             pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
             fire_start = ee.Date(default_alarm_dt.strftime('%Y-%m-%d'))
@@ -185,6 +188,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
             slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003").clip(area))
             soil = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area)
             k_factor = soil.remap([1,2,3,4,5,6,7,8,9,10,11,12], [15,25,15,30,35,20,30,40,25,45,10,5]).divide(100.0).rename('k_factor')
+            
             hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit)).multiply(ee.Image.pixelArea()).rename('hazard_area')
             precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().rename('rainfall')
             
@@ -200,11 +204,10 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 k = p.get('k_factor_mean', 0.25) or 0.25
                 vol = (p.get('hazard_area_sum', 0) or 0) * (rain/1000.0) * k
                 if h_acres > 0.1:
-                    ws_data.append({"Watershed": p.get('name', 'Unknown'), "Hazard Area (Ac)": round(h_acres,1), "Mean K-Factor": round(k,3), "Est Yield (m3)": round(vol,1)})
+                    ws_data.append({"Watershed": p.get('name', 'Unknown'), "Hazard (Ac)": round(h_acres,1), "Soil K-Factor": round(k,3), "Rain (mm)": round(rain,1), "Est Yield (m3)": round(vol,1)})
             
             if ws_data:
                 df = pd.DataFrame(ws_data).sort_values(by="Est Yield (m3)", ascending=False)
                 st.subheader("Regional Vulnerability Matrix")
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 st.altair_chart(alt.Chart(df).mark_bar(color='#ff7b00').encode(x='Est Yield (m3):Q', y=alt.Y('Watershed:N', sort='-x')), use_container_width=True)
-            else: st.info("Model complete: No high-hazard areas found with current thresholds.")
