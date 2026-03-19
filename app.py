@@ -19,30 +19,13 @@ st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 # ==========================================
 @st.cache_data
 def load_fire_perimeters():
-    # Make sure this filename perfectly matches the .shp file you uploaded to GitHub!
-    path = 'Recent_Large_Fire_Perimeters_GT_5000_acres/Recent_Large_Fire_Perimeters_(GT_5000_acres).shp'
-    
     try:
-        fires = gpd.read_file(path)
-        
-        # Standardize the Date column from FRAP
-        date_options = ['ALARM_DATE', 'ALARM_DAT', 'START_DATE', 'alarm_date', 'YEAR_']
-        found_date = next((col for col in date_options if col in fires.columns), None)
-        fires['final_date'] = pd.to_datetime(fires[found_date], errors='coerce') if found_date else pd.to_datetime('2021-06-01')
-        
-        # Standardize the Name column from FRAP
-        name_options = ['FIRE_NAME', 'incident_n', 'INCIDENT_N']
-        found_name = next((col for col in name_options if col in fires.columns), None)
-        if found_name and found_name != 'incident_n':
-            fires = fires.rename(columns={found_name: 'incident_n'})
-            
-        fires = fires.dropna(subset=['incident_n'])
-        fires['incident_n'] = fires['incident_n'].astype(str).str.upper()
-        fires = fires.dissolve(by='incident_n').reset_index()
-        
-        return fires.to_crs(epsg=4326)
+        # Geopandas is smart enough to read the GeoJSON directly out of the Zip file!
+        fires = gpd.read_file('zip://Master_Fire_Dataset.zip')
+        fires['final_date'] = pd.to_datetime(fires['final_date'])
+        return fires
     except Exception as e:
-        st.error(f"Shapefile not found. Please ensure all 5 shapefile components (.shp, .shx, .dbf, etc.) are in your GitHub. Error: {e}")
+        st.error(f"Failed to load master dataset. Error: {e}")
         return None
 
 @st.cache_data
@@ -108,7 +91,7 @@ if page == "1. Incident Briefing" and all_fires is not None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
     m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
-    m3.metric("Lead Agency", fire_subset['agency'].iloc[0] if 'agency' in fire_subset.columns else "Interagency")
+    m3.metric("Lead Agency", "Interagency Database")
     
     if impacted_count > 0:
         m4.metric("Structures Impacted", f"{impacted_count}")
@@ -127,24 +110,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
         st_folium(m, use_container_width=True, height=500)
 
     with col2:
-        st.subheader("Historical Fire Fact Sheet")
-        
-        garbage_cols = ['objectid', 'globalid', 'shape', 'geometry', 'incident_1', 'poly_datec', 'creationda', 'creator', 'editdate', 'editor', 'shape_leng', 'shape_area', 'irwinid']
-        valid_data = {}
-        for col in fire_subset.columns:
-            if str(col).lower() not in garbage_cols:
-                val = fire_subset[col].iloc[0]
-                if pd.notna(val) and val != '' and val != 0:
-                    clean_name = str(col).replace('_', ' ').title()
-                    valid_data[clean_name] = str(val)
-        
-        if valid_data:
-            df_facts = pd.DataFrame(list(valid_data.items()), columns=['Parameter', 'Recorded Data'])
-            st.dataframe(df_facts, use_container_width=True, hide_index=True)
-        else:
-            st.info("No extended metadata found in the shapefile.")
-            
-        st.markdown("---")
         st.info(f"""
         **Geomorphic Context:**
         The {selected_name} fire altered the hydrologic baseline of this region. 
@@ -266,7 +231,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
-                # sharedInputs=True allows multiple bands to be evaluated simultaneously
                 reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
@@ -311,7 +275,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     
                     st.subheader("Regional Vulnerability Map")
                     
-                    # INTERACTIVE HIGHLIGHTING FEATURE
                     huc_options = ["None"] + df_ws['HUC-12 Watershed Name'].tolist()
                     selected_basin = st.selectbox("🔍 Highlight Specific Watershed on Map:", huc_options)
                     
@@ -324,7 +287,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
                     folium.TileLayer(tiles=burn_mask.updateMask(burn_mask).getMapId({'palette':['#bd0026']})['tile_fetcher'].url_format, attr='GEE', name='Burn Scar', opacity=0.4).add_to(m3)
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Zones').add_to(m3)
 
-                    # Paint the selected basin in neon Cyan if requested
                     if selected_basin != "None":
                         highlighted_huc = huc12.filter(ee.Filter.eq('name', selected_basin))
                         highlight_outline = ee.Image(0).mask(0).paint(highlighted_huc, 'cyan', 4)
