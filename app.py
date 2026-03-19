@@ -8,6 +8,8 @@ import json
 import requests
 from datetime import datetime, timedelta
 import altair as alt
+import zipfile
+import os
 
 # ==========================================
 # 1. SYSTEM CONFIGURATION & UI
@@ -20,43 +22,30 @@ st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 @st.cache_data
 def load_fire_perimeters():
     try:
-        # Geopandas is smart enough to read the GeoJSON directly out of the Zip file!
-        fires = gpd.read_file('zip://Master_Fire_Dataset.zip')
+        # 1. Handle Mac naming quirks by checking what the file is actually called
+        possible_names = ['Master_Fire_Dataset.zip', 'Master_Fire_Dataset.geojson.zip', 'Master_Fire_Dataset.zip.zip']
+        actual_zip = next((name for name in possible_names if os.path.exists(name)), None)
+        
+        if not actual_zip:
+            st.error("Could not find the zip file in GitHub. Please check the exact file name in your repository.")
+            return None
+
+        # 2. Unzip the file directly in the Streamlit cloud environment
+        with zipfile.ZipFile(actual_zip, 'r') as zip_ref:
+            # Find the exact name of the GeoJSON inside the zip folder
+            geojson_filename = [f for f in zip_ref.namelist() if f.endswith('.geojson')][0]
+            zip_ref.extract(geojson_filename)
+            
+        # 3. Read the extracted file natively (no weird zip:// syntax required)
+        fires = gpd.read_file(geojson_filename)
         fires['final_date'] = pd.to_datetime(fires['final_date'])
+        
         return fires
+        
     except Exception as e:
         st.error(f"Failed to load master dataset. Error: {e}")
         return None
-
-@st.cache_data
-def fetch_dins_damage(incident_name):
-    url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
-    clean_name = str(incident_name).strip().upper().replace(' FIRE', '')
-    
-    params = {
-        "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major', 'Minor', 'Affected')",
-        "outFields": "*",
-        "returnCountOnly": "true",
-        "f": "json"
-    }
-    try:
-        response = requests.get(url, params=params, timeout=10).json()
-        return response.get('count', 0)
-    except:
-        return 0
-
-if 'ee_initialized' not in st.session_state:
-    try:
-        if "EARTHENGINE_JSON" in st.secrets:
-            creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
-            credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
-            ee.Initialize(credentials, project='gee-streamlit-app-490500')
-        else:
-            ee.Initialize(project='gee-streamlit-app-490500')
-        st.session_state['ee_initialized'] = True
-    except Exception as e:
-        st.error(f"GEE Init Error: {e}")
-
+        
 # ==========================================
 # 3. GLOBAL SIDEBAR NAVIGATION & PARAMETERS
 # ==========================================
