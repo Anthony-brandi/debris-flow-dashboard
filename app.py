@@ -20,7 +20,7 @@ st.set_page_config(page_title="Watershed Risk Portal", layout="wide")
 @st.cache_data
 def load_fire_perimeters():
     # Make sure this filename perfectly matches the .shp file you uploaded to GitHub!
-    path = 'Recent_Large_Fire_Perimeters_GT_5000_acres.shp' 
+    path = 'Recent_Large_Fire_Perimeters_GT_5000_acres/Recent_Large_Fire_Perimeters_(GT_5000_acres).shp'
     
     try:
         fires = gpd.read_file(path)
