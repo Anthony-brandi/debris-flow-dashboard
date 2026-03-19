@@ -45,7 +45,37 @@ def load_fire_perimeters():
     except Exception as e:
         st.error(f"Failed to load master dataset. Error: {e}")
         return None
-        
+
+@st.cache_data
+def fetch_dins_damage(incident_name):
+    # This is the function that went missing! It pulls real-time building damage from CAL FIRE.
+    url = "https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/DINS_Public_View/FeatureServer/0/query"
+    clean_name = str(incident_name).strip().upper().replace(' FIRE', '')
+    
+    params = {
+        "where": f"UPPER(INCIDENT_NAME) LIKE '%{clean_name}%' AND DAMAGE IN ('Destroyed', 'Major', 'Minor', 'Affected')",
+        "outFields": "*",
+        "returnCountOnly": "true",
+        "f": "json"
+    }
+    try:
+        response = requests.get(url, params=params, timeout=10).json()
+        return response.get('count', 0)
+    except:
+        return 0
+
+if 'ee_initialized' not in st.session_state:
+    try:
+        if "EARTHENGINE_JSON" in st.secrets:
+            creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
+            credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
+            ee.Initialize(credentials, project='gee-streamlit-app-490500')
+        else:
+            ee.Initialize(project='gee-streamlit-app-490500')
+        st.session_state['ee_initialized'] = True
+    except Exception as e:
+        st.error(f"GEE Init Error: {e}")
+
 # ==========================================
 # 3. GLOBAL SIDEBAR NAVIGATION & PARAMETERS
 # ==========================================
