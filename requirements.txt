@@ -1,6 +1,8 @@
 streamlit
 geopandas
+pandas
 folium
 streamlit-folium
 earthengine-api
-pandas
+requests
+altair
