@@ -182,11 +182,9 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 try:
                     precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V07").filterBounds(area).filterDate(target_date.advance(-1, 'month'), target_date).select('precipitation').sum().clip(area)
                     
-                    # Extract raw values from Earth Engine
                     raw_rain = precip.reduceRegion(ee.Reducer.max(), area.geometry(), 250).getInfo().get('precipitation', 0)
                     raw_hazard = hazard_mask.multiply(ee.Image.pixelArea()).reduceRegion(ee.Reducer.sum(), area.geometry(), 250).getInfo().get('nd', 0)
                     
-                    # The Safety Net: Force NoneType to 0.0 so the formatting doesn't crash
                     peak_rain = float(raw_rain) if raw_rain is not None else 0.0
                     hazard_acres = float(raw_hazard) * 0.000247105 if raw_hazard is not None else 0.0
                     
@@ -273,7 +271,7 @@ elif page == "3. Statistical Report" and all_fires is not None:
                 combined_img = burn_area_img.addBands(hazard_area_img).addBands(precip_img).addBands(k_factor)
                 huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area.geometry())
                 
-               reduced_stats_fc = combined_img.reduceRegions(
+                reduced_stats_fc = combined_img.reduceRegions(
                     collection=huc12,
                     reducer=ee.Reducer.sum().combine(reducer2=ee.Reducer.mean(), sharedInputs=True),
                     scale=500,
