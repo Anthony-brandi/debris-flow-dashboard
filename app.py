@@ -126,7 +126,6 @@ if page == "1. Incident Briefing" and all_fires is not None:
     with col2:
         st.subheader("Geomorphic Context")
         st.info("Debris flows in California are typically supply-limited. This model identifies initiation zones where 'loose' soil (high K-factor) meets high-velocity terrain (steep slopes) and low infiltration capacity (burn scars).")
-
 # ==========================================
 # PAGE 2: INTERACTIVE ANALYSIS
 # ==========================================
@@ -135,7 +134,7 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("Layer Toggles")
-    show_k = st.sidebar.checkbox("Soil Erodibility (K-Factor Heatmap)", value=True)
+    show_k = st.sidebar.checkbox("Soil Erodibility (K-Factor)", value=True)
     show_burn = st.sidebar.checkbox("Burn Severity (dNBR)", value=True)
     show_risk = st.sidebar.checkbox("Hazard Intersection (Orange)", value=True)
     show_hydro = st.sidebar.checkbox("Stream Networks", value=True)
@@ -144,31 +143,38 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     run_analysis = st.toggle("Activate Spatial Modeling Engine", value=True)
 
     if run_analysis:
-        with st.spinner("Processing satellite and topographic arrays..."):
+        with st.spinner("Crunching Earth Engine layers..."):
             try:
                 area_ee = ee.FeatureCollection(fire_subset.__geo_interface__)
                 pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
                 target_date = ee.Date(default_alarm_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
 
-                # Satellite Engine
+                # 1. Satellite Calculations
                 def get_nbr(d):
-                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area_ee).filterDate(d.advance(-3, 'month'), d.advance(3, 'month')).median().clip(area_ee).normalizedDifference(['B8', 'B12'])
+                    return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")\
+                        .filterBounds(area_ee)\
+                        .filterDate(d.advance(-3, 'month'), d.advance(3, 'month'))\
+                        .median().clip(area_ee).normalizedDifference(['B8', 'B12'])
                 
                 dnbr = get_nbr(pre_date).subtract(get_nbr(target_date))
                 slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003").clip(area_ee))
                 
-                # Soil K-Factor Heatmap
+                # 2. Soil K-Factor
                 soil = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area_ee)
                 k_factor = soil.remap([1,2,3,4,5,6,7,8,9,10,11,12], [15,25,15,30,35,20,30,40,25,45,10,5]).divide(100.0)
                 
+                # 3. Hazard and Infrastructure (RASTERIZED FOR SPEED)
                 hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
-                streams = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area_ee), 1, 2)
-                roads_ee = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area_ee)
+                
+                # We "paint" the vectors onto a blank image so they load instantly as tiles
+                streams_raster = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area_ee), 1, 2)
+                roads_raster = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area_ee), 1, 1.5)
 
+                # 4. Map Assembly
                 centroid = fire_subset.geometry.centroid.iloc[0]
                 m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google Satellite")
                 
-                # Fixed Legend
+                # Legend (Now Hard-coded)
                 legend_html = f"""<div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid black; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
                 <b>Map Legend</b><br>
                 <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:5px; border:1px solid black;"></i> Hazard Intersection<br>
@@ -179,21 +185,26 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
                 </div>"""
                 m.get_root().html.add_child(folium.Element(legend_html))
 
+                # Add Layers in stacking order (Bottom to Top)
                 if show_k:
-                    folium.TileLayer(tiles=k_factor.getMapId({'min': 0.1, 'max': 0.45, 'palette': ['#f6e8c3','#dfc27d','#bf812d','#8c510a']})['tile_fetcher'].url_format, attr='Soil', name='Soil Stability', opacity=0.5).add_to(m)
+                    folium.TileLayer(tiles=k_factor.getMapId({'min': 0.1, 'max': 0.45, 'palette': ['#f6e8c3','#dfc27d','#bf812d','#8c510a']})['tile_fetcher'].url_format, attr='Soil', name='Soil Stability', opacity=0.4).add_to(m)
+                
                 if show_burn:
-                    folium.TileLayer(tiles=dnbr.updateMask(dnbr.gt(0.1)).getMapId({'min': 0.1, 'max': 0.5, 'palette': ['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']})['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.7).add_to(m)
+                    folium.TileLayer(tiles=dnbr.updateMask(dnbr.gt(0.1)).getMapId({'min': 0.1, 'max': 0.5, 'palette': ['#ffffb2','#fecc5c','#fd8d3c','#f03b20','#bd0026']})['tile_fetcher'].url_format, attr='S2', name='Burn Status', opacity=0.6).add_to(m)
+                
                 if show_risk:
                     folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE', name='Hazard Intersection').add_to(m)
+                
                 if show_hydro:
-                    folium.TileLayer(tiles=streams.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro', name='Flow Paths').add_to(m)
+                    folium.TileLayer(tiles=streams_raster.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro', name='Flow Paths').add_to(m)
+                
                 if show_roads:
-                    folium.GeoJson(roads_ee.getInfo(), style_function=lambda x: {'color': 'white', 'weight': 1.5, 'opacity': 0.8}, name='Infrastructure').add_to(m)
+                    folium.TileLayer(tiles=roads_raster.getMapId({'palette':['#ffffff']})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m)
 
                 st_folium(m, use_container_width=True, height=750)
+                
             except Exception as e:
                 st.error(f"Geospatial rendering failed: {e}")
-
 # ==========================================
 # PAGE 3: STATISTICAL REPORT
 # ==========================================
