@@ -82,21 +82,19 @@ if all_fires is not None:
 # ==========================================
 if page == "1. Incident Briefing" and all_fires is not None:
     st.header(f"Incident Brief: {selected_name}")
+    impacted_count = fetch_dins_damage(selected_name)
+    total_acres = (fire_subset.to_crs(epsg=3310).area.sum()) * 0.000247105
     
-    with st.spinner("Calculating infrastructure exposure..."):
-        impacted_count = fetch_dins_damage(selected_name)
-        total_acres = (fire_subset.to_crs(epsg=3310).area.sum()) * 0.000247105
-        
-        # Calculate Miles of Exposed Roadway
-        area = ee.FeatureCollection(fire_subset.__geo_interface__)
-        tiger_roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area.geometry())
-        road_miles = tiger_roads.aggregate_sum('length').getInfo() / 1609.34 # Convert meters to miles
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
-        m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
-        m3.metric("Verified Damage", f"{impacted_count} Struct")
-        m4.metric("Road Infrastructure", f"{road_miles:,.1f} Miles")
+    # Infrastructure Metric
+    area = ee.FeatureCollection(fire_subset.__geo_interface__)
+    roads_fc = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area.geometry())
+    road_miles = roads_fc.aggregate_sum('length').getInfo() / 1609.34 if roads_fc.size().getInfo() > 0 else 0
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Recorded Ignition", default_alarm_dt.strftime('%b %d, %Y'))
+    m2.metric("Total Perimeter", f"{total_acres:,.1f} Ac")
+    m3.metric("Verified Damage", f"{impacted_count} Struct")
+    m4.metric("Road Exposure", f"{road_miles:,.1f} Miles")
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -105,15 +103,14 @@ if page == "1. Incident Briefing" and all_fires is not None:
         folium.GeoJson(fire_subset.geometry, style_function=lambda x: {'color': 'red', 'weight': 2, 'fillOpacity': 0.1}).add_to(m)
         st_folium(m, use_container_width=True, height=500)
     with col2:
-        st.subheader("Geomorphic Rationale")
-        st.info("The sediment yield calculation uses the Modified Universal Soil Loss Equation (MUSLE) logic: intersecting high-severity burn scars with erodible K-factor soil and gravitational slope velocity.")
+        st.subheader("Analysis Goals")
+        st.info("Mapping the intersection of soil erodibility, geomorphic steepness, and post-fire canopy loss.")
 
 # ==========================================
 # PAGE 2: INTERACTIVE ANALYSIS
 # ==========================================
 elif page == "2. Interactive Analysis" and all_fires is not None:
     st.title("Interactive GIS Lab")
-    
     st.sidebar.markdown("---")
     st.sidebar.subheader("Layer Toggles")
     show_k = st.sidebar.checkbox("Soil Erodibility (K-Factor)", value=True)
@@ -123,12 +120,11 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
     run_analysis = st.toggle("Activate Spatial Modeling Engine", value=True)
 
     if run_analysis:
-        with st.spinner("Requesting satellite and topographic arrays..."):
+        with st.spinner("Rendering multispectral layers..."):
             area = ee.FeatureCollection(fire_subset.__geo_interface__)
             pre_date = ee.Date(manual_baseline.strftime('%Y-%m-%d'))
             target_date = ee.Date(default_alarm_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
 
-            # Raster Operations
             def get_nbr(d): return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area).filterDate(d.advance(-3, 'month'), d.advance(3, 'month')).median().clip(area).normalizedDifference(['B8', 'B12'])
             dnbr = get_nbr(pre_date).subtract(get_nbr(target_date))
             slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003").clip(area))
@@ -136,14 +132,12 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
             k_factor = soil.remap([1,2,3,4,5,6,7,8,9,10,11,12], [15,25,15,30,35,20,30,40,25,45,10,5]).divide(100.0)
             hazard_mask = slope.gte(slope_limit).And(dnbr.gt(dnbr_limit))
             
-            # Vector Operations (Clipped for speed)
             streams = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 2)
             roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area)
 
             centroid = fire_subset.geometry.centroid.iloc[0]
-            m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google")
+            m = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr="Google Satellite")
             
-            # Persistent Legend
             legend_html = f"""<div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid black; z-index:9999; font-size:12px; padding: 10px; border-radius: 5px;">
             <b>Map Legend</b><br>
             <i style="background:#ff7b00; width:12px; height:12px; float:left; margin-right:5px; border:1px solid black;"></i> Hazard Intersection<br>
@@ -159,11 +153,11 @@ elif page == "2. Interactive Analysis" and all_fires is not None:
             if show_risk: folium.TileLayer(tiles=hazard_mask.updateMask(hazard_mask).getMapId({'palette':['#ff7b00']})['tile_fetcher'].url_format, attr='GEE').add_to(m)
             
             folium.TileLayer(tiles=streams.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro').add_to(m)
-            folium.GeoJson(roads.getInfo(), style_function=lambda x: {'color': 'white', 'weight': 1.5}).add_to(m)
+            folium.GeoJson(roads.getInfo(), style_function=lambda x: {'color': 'white', 'weight': 1.5, 'opacity': 0.8}).add_to(m)
             st_folium(m, use_container_width=True, height=700)
 
 # ==========================================
-# PAGE 3: STATISTICAL REPORT (RESTRUCTURED)
+# PAGE 3: STATISTICAL REPORT
 # ==========================================
 elif page == "3. Statistical Report" and all_fires is not None:
     st.title("Watershed Risk Matrix")
@@ -174,7 +168,6 @@ elif page == "3. Statistical Report" and all_fires is not None:
             area = ee.FeatureCollection(fire_subset.__geo_interface__)
             target_date = ee.Date(default_alarm_dt.strftime('%Y-%m-%d')).advance(recovery_months, 'month')
             
-            # GEE Reducer Logic
             def get_nbr(d): return ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED").filterBounds(area).filterDate(d.advance(-3, 'month'), d.advance(3, 'month')).median().clip(area).normalizedDifference(['B8', 'B12'])
             dnbr = get_nbr(ee.Date(manual_baseline.strftime('%Y-%m-%d'))).subtract(get_nbr(target_date))
             slope = ee.Terrain.slope(ee.Image("USGS/SRTMGL1_003").clip(area))
@@ -191,33 +184,29 @@ elif page == "3. Statistical Report" and all_fires is not None:
             for f in stats['features']:
                 p = f['properties']
                 h_acres = (p.get('hazard_area_sum', 0) or 0) * 0.000247105
-                rain = p.get('rainfall_mean', 0) or 0
                 k = p.get('k_factor_mean', 0.25) or 0.25
-                vol = (p.get('hazard_area_sum', 0) or 0) * (rain/1000.0) * k
+                vol = (p.get('hazard_area_sum', 0) or 0) * ( (p.get('rainfall_mean', 0) or 0) / 1000.0) * k
                 if h_acres > 0.05:
-                    ws_data.append({"Watershed": p.get('name', 'Unknown'), "Hazard (Ac)": round(h_acres,1), "Soil K": round(k,3), "Rain (mm)": round(rain,1), "Yield (m3)": round(vol,1)})
+                    ws_data.append({"Watershed": p.get('name', 'Unknown'), "Hazard (Ac)": round(h_acres,1), "Soil K": round(k,3), "Est Yield (m3)": round(vol,1)})
 
             if ws_data:
-                df = pd.DataFrame(ws_data).sort_values(by="Yield (m3)", ascending=False)
+                df = pd.DataFrame(ws_data).sort_values(by="Est Yield (m3)", ascending=False)
                 
                 st.subheader("Regional Vulnerability Map")
-                sel_ws = st.selectbox("Highlight Watershed for Detailed Analysis", ["None"] + df['Watershed'].tolist())
+                sel_ws = st.selectbox("Highlight Watershed", ["None"] + df['Watershed'].tolist())
                 centroid = fire_subset.geometry.centroid.iloc[0]
                 m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB Positron')
                 
-                # Render Watershed boundaries
                 folium.GeoJson(huc12.getInfo(), style_function=lambda x: {'color': 'purple', 'weight': 1, 'fillOpacity': 0}).add_to(m3)
-                
                 if sel_ws != "None":
                     highlight = huc12.filter(ee.Filter.eq('name', sel_ws))
                     folium.GeoJson(highlight.getInfo(), style_function=lambda x: {'color': 'cyan', 'weight': 3, 'fillOpacity': 0.2}).add_to(m3)
                 
-                # Render Stream Networks
                 streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 2)
-                folium.TileLayer(tiles=streams_img.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro', name='Streams').add_to(m3)
+                folium.TileLayer(tiles=streams_img.getMapId({'palette':['#00d4ff']})['tile_fetcher'].url_format, attr='Hydro').add_to(m3)
                 st_folium(m3, use_container_width=True, height=500)
                 
                 st.markdown("---")
                 st.dataframe(df, use_container_width=True, hide_index=True)
-                st.altair_chart(alt.Chart(df).mark_bar(color='#ff7b00').encode(x='Yield (m3):Q', y=alt.Y('Watershed:N', sort='-x')), use_container_width=True)
-            else: st.warning("Adjust thresholds in the sidebar to view statistical results for this perimeter.")
+                st.altair_chart(alt.Chart(df).mark_bar(color='#ff7b00').encode(x='Est Yield (m3):Q', y=alt.Y('Watershed:N', sort='-x')), use_container_width=True)
+            else: st.warning("Adjust thresholds to see statistical results.")
