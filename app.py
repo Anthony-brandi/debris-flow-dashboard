@@ -6,6 +6,8 @@ from streamlit_folium import st_folium
 import ee
 import json
 from datetime import datetime, timedelta
+import zipfile
+import os
 
 # ==========================================
 # 1. PAGE SETUP & ARCHITECTURE
@@ -34,14 +36,34 @@ if 'ee_initialized' not in st.session_state:
     except Exception as e:
         st.error(f"Earth Engine Initialization Error: {e}")
 
+# ==========================================
+# 3. ROBUST CLOUD DATA LOADER
+# ==========================================
 @st.cache_data
 def load_and_clean_data():
-    # Update this path to match your local environment
-    path = 'Master_Fire_Dataset.geojson.zip'
+    zip_path = 'Master_Fire_Dataset.geojson.zip'
+    extract_dir = 'temp_fire_data'
+    
     try:
-        fires = gpd.read_file(path)
-        fires = fires.dissolve(by='incident_n').reset_index()
-        return fires.to_crs(epsg=4326)
+        # Step 1: Unzip the file programmatically, ignoring hidden Mac folders
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for member in zip_ref.namelist():
+                    # Only extract the actual geojson, ignore __MACOSX
+                    if not member.startswith('__MACOSX') and member.endswith('.geojson'):
+                        zip_ref.extract(member, extract_dir)
+        
+        # Step 2: Find the extracted file and load it
+        for file in os.listdir(extract_dir):
+            if file.endswith('.geojson'):
+                geojson_path = os.path.join(extract_dir, file)
+                fires = gpd.read_file(geojson_path)
+                fires = fires.dissolve(by='incident_n').reset_index()
+                return fires.to_crs(epsg=4326)
+                
+        raise FileNotFoundError("No .geojson file was found inside the zip archive.")
+        
     except Exception as e:
         st.error(f"Failed to load perimeter data: {e}")
         return gpd.GeoDataFrame()
