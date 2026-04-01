@@ -85,7 +85,6 @@ if not cal_fires.empty:
                 break
             except: continue
 
-    # ADJUSTED DATES: 10 to 90 days post-fire to avoid winter cloud cover masking out the burn scar
     pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
     pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
     post_fire_start = (ignition_date + timedelta(days=10)).strftime('%Y-%m-%d')
@@ -122,16 +121,15 @@ elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
     
     SLOPE_LIMIT = 25
-    DNBR_THRESHOLD = 0.15  # Adjusted back to your original baseline to ensure detection
+    DNBR_THRESHOLD = 0.15
     
     st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}\n\n**Concavity:** Zero-Order Basins")
-    with st.sidebar.expander("Methodology & Reasoning"):
-        st.write("""
-        **Gravitational Energy:** Slopes > 25 Degrees provide necessary velocity.
-        **Burn Severity:** dNBR > 0.15 isolates hydrophobic soil sealing.
-        **Topographic Concavity:** Debris flows do not initiate on flat ridges. The concavity kernel isolates ravines and hollows that actively funnel water inward, serving as the critical geomorphic trigger.
-        """)
-
+    
+    # --- UI UPDATE: Basemap Toggle ---
+    st.sidebar.markdown("### Map Controls")
+    basemap_choice = st.sidebar.radio("Reference Basemap:", ["Satellite", "Terrain", "Minimal"])
+    
+    st.sidebar.markdown("### Layer Visibility")
     show_risk = st.sidebar.checkbox("Hazard Intersection (Risk)", value=True)
     show_slope = st.sidebar.checkbox("Topographic Velocity (Slope)", value=False)
     show_concavity = st.sidebar.checkbox("Topographic Concavity (Hollows)", value=False) 
@@ -145,7 +143,6 @@ elif page == "2. Spatial Modeling Lab":
         slope = ee.Terrain.slope(dem).clip(area)
         slope_mask = slope.gte(SLOPE_LIMIT)
 
-        # FIXED CONCAVITY: Pixel-level focal mean prevents dynamic zoom errors. Target is -3 meters depth.
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
@@ -161,29 +158,63 @@ elif page == "2. Spatial Modeling Lab":
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
         streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 1)
 
-        m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
-        if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':['yellow'],'opacity':0.4})['tile_fetcher'].url_format, attr='USGS', name='Slope').add_to(m2)
-        if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':['#8e44ad'],'opacity':0.6})['tile_fetcher'].url_format, attr='USGS', name='Concavity').add_to(m2)
-        if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':['red'],'opacity':0.4})['tile_fetcher'].url_format, attr='ESA', name='Severity').add_to(m2)
-        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'palette':['#800026'],'opacity':0.4})['tile_fetcher'].url_format, attr='Soil', name='Soils').add_to(m2)
-        if show_streams: folium.TileLayer(tiles=streams_img.getMapId({'palette':['#3498db']})['tile_fetcher'].url_format, attr='WWF', name='Streams').add_to(m2)
-        if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':['#2ecc71']})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
-        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'palette':['#ff7b00'],'opacity':0.9})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
+        # Apply the Basemap Logic
+        if basemap_choice == "Satellite":
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
+            perimeter_color = 'white'
+        elif basemap_choice == "Terrain":
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}', attr='Google Terrain')
+            perimeter_color = 'black'
+        else:
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='CartoDB positron')
+            perimeter_color = 'black'
 
-        legend_html = """
+        # --- UI UPDATE: Permanent Boundary ---
+        folium.GeoJson(
+            fire_data.geometry, 
+            style_function=lambda x: {'fillColor': 'transparent', 'color': perimeter_color, 'weight': 2.5, 'dashArray': '5, 5'}
+        ).add_to(m2)
+
+        # Layer Hex Colors (Updated for better separation)
+        C_RISK = '#FF5733' # High-vis Safety Orange
+        C_SLOPE = 'yellow'
+        C_CONCAVITY = '#8e44ad' # Purple
+        C_SEVERITY = 'red'
+        C_SOILS = '#8B4513' # Saddle Brown (To separate from red severity)
+        C_STREAMS = '#3498db'
+        C_ROADS = '#2ecc71'
+
+        if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE],'opacity':0.4})['tile_fetcher'].url_format, attr='USGS', name='Slope').add_to(m2)
+        if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY],'opacity':0.6})['tile_fetcher'].url_format, attr='USGS', name='Concavity').add_to(m2)
+        if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY],'opacity':0.4})['tile_fetcher'].url_format, attr='ESA', name='Severity').add_to(m2)
+        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'palette':[C_SOILS],'opacity':0.6})['tile_fetcher'].url_format, attr='Soil', name='Soils').add_to(m2)
+        if show_streams: folium.TileLayer(tiles=streams_img.getMapId({'palette':[C_STREAMS]})['tile_fetcher'].url_format, attr='WWF', name='Streams').add_to(m2)
+        if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':[C_ROADS]})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
+        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'palette':[C_RISK],'opacity':1.0})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
+
+        # --- UI UPDATE: Dynamic Legend ---
+        legend_items = []
+        if show_risk: legend_items.append(f'<i style="background:{C_RISK}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>')
+        if show_slope: legend_items.append(f'<i style="background:{C_SLOPE}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Critical Slope<br>')
+        if show_concavity: legend_items.append(f'<i style="background:{C_CONCAVITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Topographic Concavity<br>')
+        if show_severity: legend_items.append(f'<i style="background:{C_SEVERITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Severe dNBR<br>')
+        if show_soils: legend_items.append(f'<i style="background:{C_SOILS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Erodible Soils<br>')
+        if show_streams: legend_items.append(f'<i style="background:{C_STREAMS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Stream Routing<br>')
+        if show_roads: legend_items.append(f'<i style="background:{C_ROADS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Infrastructure<br>')
+        
+        # Always display the perimeter legend item
+        legend_items.append(f'<i style="background:transparent; border: 2px dashed {perimeter_color}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Fire Perimeter<br>')
+
+        legend_html = f"""
         <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px;">
         <b>PF-WRP Legend</b><br>
-        <i style="background:#ff7b00; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>
-        <i style="background:yellow; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Critical Slope<br>
-        <i style="background:#8e44ad; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Topographic Concavity<br>
-        <i style="background:red; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Severe dNBR<br>
-        <i style="background:#800026; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Erodible Soils<br>
-        <i style="background:#3498db; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Stream Routing<br>
-        <i style="background:#2ecc71; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Infrastructure<br>
+        {''.join(legend_items)}
         </div>"""
+        
         m2.get_root().html.add_child(folium.Element(legend_html))
 
-        toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_concavity}{show_severity}{show_soils}{show_streams}{show_roads}"
+        # Add basemap_choice to the key so Streamlit redraws when map type changes
+        toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_concavity}{show_severity}{show_soils}{show_streams}{show_roads}_{basemap_choice}"
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
 # ==========================================
@@ -280,6 +311,12 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
             m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
+
+            # Added permanent fire boundary to Page 3 as well for consistency
+            folium.GeoJson(
+                fire_data.geometry, 
+                style_function=lambda x: {'fillColor': 'transparent', 'color': 'black', 'weight': 2, 'dashArray': '5, 5'}
+            ).add_to(m3)
 
             folium.Choropleth(
                 geo_data=gdf,
