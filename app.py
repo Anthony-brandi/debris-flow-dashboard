@@ -18,7 +18,7 @@ st.sidebar.title("PF-WRP Navigation")
 page = st.sidebar.radio("Select Module:", [
     "1. Incident Briefing", 
     "2. Spatial Modeling Lab", 
-    "3. Watershed Loading (Phase 2)"
+    "3. Watershed Loading (Phase 2 & 3)"
 ])
 
 # ==========================================
@@ -120,7 +120,6 @@ if page == "1. Incident Briefing":
 elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
     
-    # HARDCODED THRESHOLDS
     SLOPE_LIMIT = 25
     DNBR_THRESHOLD = 0.25
     
@@ -163,13 +162,13 @@ elif page == "2. Spatial Modeling Lab":
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
 # ==========================================
-# PAGE 3: WATERSHED LOADING (PHASE 2)
+# PAGE 3: WATERSHED LOADING (PHASE 2 & 3)
 # ==========================================
-elif page == "3. Watershed Loading (Phase 2)":
+elif page == "3. Watershed Loading (Phase 2 & 3)":
     st.title("Watershed Loading (Vulnerability Matrix)")
     
     with st.spinner("Executing zonal statistics and sediment math across HUC-12 basins via Earth Engine..."):
-        # 1. Recalculate Hazard Layers (No Map Rendering)
+        # 1. Recalculate Hazard Layers
         SLOPE_LIMIT = 25
         DNBR_THRESHOLD = 0.25
 
@@ -185,7 +184,7 @@ elif page == "3. Watershed Loading (Phase 2)":
         hazard_intersection = slope_mask.And(severity_mask).And(erodible_soils).selfMask()
         hazard_area_img = hazard_intersection.multiply(ee.Image.pixelArea())
 
-        # 2. NASA GPM Precipitation (Simulated peak storm during the window)
+        # 2. NASA GPM Precipitation
         precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V06").filterDate(post_fire_start, post_fire_end).select('precipitationCal').max().clip(area)
 
         # 3. Intersect with HUC-12 Basins
@@ -193,17 +192,14 @@ elif page == "3. Watershed Loading (Phase 2)":
 
         def process_basin(f):
             geom = f.geometry()
-            # Strict scale constraints (30m for hazard, 100m for rain) to balance speed and accuracy
             h_area = hazard_area_img.reduceRegion(reducer=ee.Reducer.sum(), geometry=geom, scale=30, maxPixels=1e9).get('slope')
             p_mean = precip.reduceRegion(reducer=ee.Reducer.mean(), geometry=geom, scale=100, maxPixels=1e9).get('precipitationCal')
             return f.set('hazard_area_m2', h_area).set('peak_rain_mm', p_mean)
 
         huc12_processed = huc12.map(process_basin)
-
-        # Extract data from Google Servers to local Python
         huc_data = huc12_processed.getInfo()
 
-        # 4. The Vulnerability Matrix (Python Logic)
+        # 4. The Vulnerability Matrix
         basin_results = []
         for feature in huc_data['features']:
             props = feature['properties']
@@ -213,13 +209,11 @@ elif page == "3. Watershed Loading (Phase 2)":
             raw_area = props.get('hazard_area_m2')
             raw_rain = props.get('peak_rain_mm')
 
-            # TECHNICAL GUARDRAIL: NoneType Resilience
             h_area_m2 = float(raw_area) if raw_area is not None else 0.0
             p_rain_mm = float(raw_rain) if raw_rain is not None else 0.0
 
-            # SEDIMENT MATH: Area * Depth * K-Factor
-            rain_depth_m = (p_rain_mm * 24) / 1000.0  # Assuming 24h peak storm equivalent
-            k_factor = 0.35  # proxy for highly erodible loams/silts
+            rain_depth_m = (p_rain_mm * 24) / 1000.0
+            k_factor = 0.35
             sediment_yield_m3 = h_area_m2 * rain_depth_m * k_factor
 
             basin_results.append({
@@ -230,8 +224,7 @@ elif page == "3. Watershed Loading (Phase 2)":
                 'Sediment Yield (m³)': sediment_yield_m3
             })
 
-        df_results = pd.DataFrame(basin_results)
-        df_results = df_results.sort_values(by='Sediment Yield (m³)', ascending=False)
+        df_results = pd.DataFrame(basin_results).sort_values(by='Sediment Yield (m³)', ascending=False)
 
         # 5. Render Page 3 UI
         col1, col2 = st.columns([1, 2])
@@ -240,17 +233,28 @@ elif page == "3. Watershed Loading (Phase 2)":
             st.markdown("### Watershed Matrix")
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
             st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils.")
+            
+            # --- PHASE 3 FEATURE: EXECUTIVE EXPORT BUTTON ---
+            st.markdown("---")
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            clean_fire_name = selected_fire.replace(" ", "_")
+            st.download_button(
+                label="📥 Download Executive Report (CSV)",
+                data=csv_data,
+                file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
-    with col2:
-            st.markdown("### Basin Choropleth & Stream Routing")
-            # Prepare GeoPandas for Folium Choropleth
+        with col2:
+            st.markdown("### Basin Choropleth & Stream Transport")
+            
             gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
-            gdf.set_crs(epsg=4326, inplace=True) # <--- THIS IS THE FIX
+            gdf.set_crs(epsg=4326, inplace=True) # The vital CRS fix!
             gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
             m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
 
-            # Render Choropleth
             folium.Choropleth(
                 geo_data=gdf,
                 name='Sediment Yield',
@@ -263,11 +267,26 @@ elif page == "3. Watershed Loading (Phase 2)":
                 legend_name='Estimated Sediment Yield (Cubic Meters)'
             ).add_to(m3)
 
-            # Rasterize and Overlay WWF Stream Routing
-            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
-            streams_img = ee.Image(0).mask(0).paint(streams, 1, 1)
-            stream_vis = streams_img.getMapId({'palette': ['#3498db']})
-            folium.TileLayer(tiles=stream_vis['tile_fetcher'].url_format, attr='WWF', name='Stream Routing', overlay=True).add_to(m3)
+            # --- PHASE 3 FEATURE: FLOW ACCUMULATION (TRANSPORT) ---
+            # We use a logarithmic scale because flow accumulation grows exponentially downstream
+            flow_acc = ee.Image("WWF/HydroSHEDS/15ACC").clip(area)
+            flow_acc_log = flow_acc.log10()
+            
+            # Mask out tiny ephemeral streams (values < 2.0 in log scale)
+            flow_mask = flow_acc_log.gte(2.0)
+            
+            stream_vis = flow_acc_log.updateMask(flow_mask).getMapId({
+                'min': 2, 
+                'max': 5,
+                'palette': ['#00b4d8', '#0077b6', '#03045e'] # Scales from bright blue to dark navy
+            })
+            
+            folium.TileLayer(
+                tiles=stream_vis['tile_fetcher'].url_format, 
+                attr='WWF', 
+                name='Flow Accumulation Transport', 
+                overlay=True
+            ).add_to(m3)
 
             # Interactive Tooltips
             tooltip = folium.GeoJsonTooltip(
