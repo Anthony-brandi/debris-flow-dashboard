@@ -85,10 +85,11 @@ if not cal_fires.empty:
                 break
             except: continue
 
+    # ADJUSTED DATES: 10 to 90 days post-fire to avoid winter cloud cover masking out the burn scar
     pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
     pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
-    post_fire_start = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
-    post_fire_end = (ignition_date + timedelta(days=180)).strftime('%Y-%m-%d')
+    post_fire_start = (ignition_date + timedelta(days=10)).strftime('%Y-%m-%d')
+    post_fire_end = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
     centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
@@ -121,14 +122,14 @@ elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
     
     SLOPE_LIMIT = 25
-    DNBR_THRESHOLD = 0.25
+    DNBR_THRESHOLD = 0.15  # Adjusted back to your original baseline to ensure detection
     
-    st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT}°\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}\n\n**Concavity:** Zero-Order Basins")
+    st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}\n\n**Concavity:** Zero-Order Basins")
     with st.sidebar.expander("Methodology & Reasoning"):
         st.write("""
-        **Gravitational Energy:** Slopes > 25° provide necessary velocity.
-        **Burn Severity:** dNBR > 0.25 isolates hydrophobic soil sealing.
-        **Topographic Concavity (New):** Debris flows do not initiate on flat ridges. The concavity kernel isolates ravines and hollows that actively funnel water inward, serving as the critical geomorphic trigger.
+        **Gravitational Energy:** Slopes > 25 Degrees provide necessary velocity.
+        **Burn Severity:** dNBR > 0.15 isolates hydrophobic soil sealing.
+        **Topographic Concavity:** Debris flows do not initiate on flat ridges. The concavity kernel isolates ravines and hollows that actively funnel water inward, serving as the critical geomorphic trigger.
         """)
 
     show_risk = st.sidebar.checkbox("Hazard Intersection (Risk)", value=True)
@@ -144,19 +145,17 @@ elif page == "2. Spatial Modeling Lab":
         slope = ee.Terrain.slope(dem).clip(area)
         slope_mask = slope.gte(SLOPE_LIMIT)
 
-        # Topographic Concavity Kernel
-        kernel = ee.Kernel.circle(radius=90, units='meters')
-        local_mean = dem.reduceNeighborhood(reducer=ee.Reducer.mean(), kernel=kernel).clip(area)
-        concavity_mask = dem.subtract(local_mean).lt(-2) 
+        # FIXED CONCAVITY: Pixel-level focal mean prevents dynamic zoom errors. Target is -3 meters depth.
+        local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
+        concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
+        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
+        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
         
-        # Hazard Intersection with Concavity
         hazard_intersection = slope_mask.And(concavity_mask).And(severity_mask).And(erodible_soils).selfMask()
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -194,19 +193,17 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
     st.title("Watershed Loading (Vulnerability Matrix)")
     
     with st.spinner("Executing zonal statistics and sediment math across HUC-12 basins via Earth Engine..."):
-        # 1. Recalculate Hazard Layers with Concavity Physics
         SLOPE_LIMIT = 25
-        DNBR_THRESHOLD = 0.25
+        DNBR_THRESHOLD = 0.15
 
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
         
-        kernel = ee.Kernel.circle(radius=90, units='meters')
-        local_mean = dem.reduceNeighborhood(reducer=ee.Reducer.mean(), kernel=kernel).clip(area)
-        concavity_mask = dem.subtract(local_mean).lt(-2)
+        local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
+        concavity_mask = dem.subtract(local_mean).lt(-3)
 
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
+        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
+        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
         severity_mask = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12'])).gte(DNBR_THRESHOLD)
 
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
@@ -214,10 +211,8 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         hazard_intersection = slope_mask.And(concavity_mask).And(severity_mask).And(erodible_soils).selfMask()
         hazard_area_img = hazard_intersection.multiply(ee.Image.pixelArea())
 
-        # 2. NASA GPM Precipitation
         precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V06").filterDate(post_fire_start, post_fire_end).select('precipitationCal').max().clip(area)
 
-        # 3. Intersect with HUC-12 Basins
         huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
 
         def process_basin(f):
@@ -229,7 +224,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         huc12_processed = huc12.map(process_basin)
         huc_data = huc12_processed.getInfo()
 
-        # 4. The Vulnerability Matrix
         basin_results = []
         for feature in huc_data['features']:
             props = feature['properties']
@@ -256,7 +250,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
 
         df_results = pd.DataFrame(basin_results).sort_values(by='Sediment Yield (m³)', ascending=False)
 
-        # 5. Render Page 3 UI
         col1, col2 = st.columns([1, 2])
 
         with col1:
@@ -264,12 +257,11 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
             st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils. *Note: Area calculation utilizes the Topographic Concavity filter to isolate zero-order basins.*")
             
-            # Executive Export Button
             st.markdown("---")
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             clean_fire_name = selected_fire.replace(" ", "_")
             st.download_button(
-                label="📥 Download Executive Report (CSV)",
+                label="Download Executive Report (CSV)",
                 data=csv_data,
                 file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
                 mime="text/csv",
@@ -277,7 +269,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 use_container_width=True
             )
 
-            # Stream Transport Explanation
             st.markdown("---")
             st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Average Long-Term Discharge** (Flow Accumulation proxy). \n* **Thin / Cyan:** Headwater streams (low discharge).\n* **Thick / Navy:** Major transport arteries (massive discharge). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
 
@@ -294,7 +285,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 geo_data=gdf,
                 name='Sediment Yield',
                 data=df_results,
-                columns=['HUC12_ID', 'Sediment Yield (m³)'],
+                columns=['HUC12_ID', 'Sediment Yield (m³)', 'Basin Name'],
                 key_on='feature.properties.huc12',
                 fill_color='YlOrRd',
                 fill_opacity=0.7,
@@ -302,7 +293,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 legend_name='Estimated Sediment Yield (Cubic Meters)'
             ).add_to(m3)
 
-            # PHASE 3 FEATURE: VECTOR FLOW ACCUMULATION (DISCHARGE)
             streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
             
             def style_streams(f):
@@ -327,10 +317,9 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 overlay=True
             ).add_to(m3)
 
-            # Interactive Tooltips
             tooltip = folium.GeoJsonTooltip(
-                fields=['name', 'Sediment Yield (m³)'],
-                aliases=['Basin:', 'Est. Yield (m³):'],
+                fields=['name', 'Sediment Yield (m³)', 'Hazard Area (Acres)'],
+                aliases=['Basin:', 'Est. Yield (m³):', 'Hazard Area (Acres):'],
                 localize=True
             )
             folium.GeoJson(
