@@ -241,10 +241,11 @@ elif page == "3. Watershed Loading (Phase 2)":
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
             st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils.")
 
-        with col2:
+    with col2:
             st.markdown("### Basin Choropleth & Stream Routing")
             # Prepare GeoPandas for Folium Choropleth
             gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
+            gdf.set_crs(epsg=4326, inplace=True) # <--- THIS IS THE FIX
             gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
             m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
