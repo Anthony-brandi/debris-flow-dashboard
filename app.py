@@ -29,7 +29,6 @@ if 'ee_initialized' not in st.session_state:
         if "EARTHENGINE_JSON" in st.secrets:
             creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
             credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
-            # Corrected Project ID to match your service account
             ee.Initialize(credentials, project='gee-streamlit-app-490500')
         else:
             ee.Initialize(project='gee-streamlit-app-490500')
@@ -110,6 +109,7 @@ if page == "1. Incident Briefing":
     total_ac = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
     st.metric("Total Acres Burned", f"{total_ac:,.0f} ac")
     st.metric("Estimated Ignition Date", ignition_date.strftime('%B %d, %Y'))
+    
     m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles="CartoDB positron")
     folium.GeoJson(fire_data.geometry, style_function=lambda x: {'fillColor': 'red', 'color': 'darkred', 'weight': 2, 'fillOpacity': 0.4}).add_to(m)
     st_folium(m, use_container_width=True, height=500)
@@ -119,10 +119,12 @@ if page == "1. Incident Briefing":
 # ==========================================
 elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
+    
+    # HARDCODED THRESHOLDS
     SLOPE_LIMIT = 25
     DNBR_THRESHOLD = 0.25
-    st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT}°\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}")
     
+    st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT}°\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}")
     with st.sidebar.expander("Methodology & Reasoning"):
         st.write("Slopes > 25° provide gravitational energy for debris initiation. dNBR > 0.25 isolates moderate-to-high severity zones where hydrophobic soil sealing is likely.")
 
@@ -160,5 +162,122 @@ elif page == "2. Spatial Modeling Lab":
         toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_severity}{show_soils}{show_streams}{show_roads}"
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
+# ==========================================
+# PAGE 3: WATERSHED LOADING (PHASE 2)
+# ==========================================
 elif page == "3. Watershed Loading (Phase 2)":
-    st.warning("Phase 2 Module: Vulnerability Matrix and Sediment Yield Calculations are currently under development.")
+    st.title("Watershed Loading (Vulnerability Matrix)")
+    
+    with st.spinner("Executing zonal statistics and sediment math across HUC-12 basins via Earth Engine..."):
+        # 1. Recalculate Hazard Layers (No Map Rendering)
+        SLOPE_LIMIT = 25
+        DNBR_THRESHOLD = 0.25
+
+        dem = ee.Image("USGS/SRTMGL1_003")
+        slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
+
+        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
+        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
+        severity_mask = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12'])).gte(DNBR_THRESHOLD)
+
+        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
+        
+        hazard_intersection = slope_mask.And(severity_mask).And(erodible_soils).selfMask()
+        hazard_area_img = hazard_intersection.multiply(ee.Image.pixelArea())
+
+        # 2. NASA GPM Precipitation (Simulated peak storm during the window)
+        precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V06").filterDate(post_fire_start, post_fire_end).select('precipitationCal').max().clip(area)
+
+        # 3. Intersect with HUC-12 Basins
+        huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
+
+        def process_basin(f):
+            geom = f.geometry()
+            # Strict scale constraints (30m for hazard, 100m for rain) to balance speed and accuracy
+            h_area = hazard_area_img.reduceRegion(reducer=ee.Reducer.sum(), geometry=geom, scale=30, maxPixels=1e9).get('slope')
+            p_mean = precip.reduceRegion(reducer=ee.Reducer.mean(), geometry=geom, scale=100, maxPixels=1e9).get('precipitationCal')
+            return f.set('hazard_area_m2', h_area).set('peak_rain_mm', p_mean)
+
+        huc12_processed = huc12.map(process_basin)
+
+        # Extract data from Google Servers to local Python
+        huc_data = huc12_processed.getInfo()
+
+        # 4. The Vulnerability Matrix (Python Logic)
+        basin_results = []
+        for feature in huc_data['features']:
+            props = feature['properties']
+            name = props.get('name', 'Unknown Basin')
+            huc12_id = props.get('huc12', 'Unknown ID')
+
+            raw_area = props.get('hazard_area_m2')
+            raw_rain = props.get('peak_rain_mm')
+
+            # TECHNICAL GUARDRAIL: NoneType Resilience
+            h_area_m2 = float(raw_area) if raw_area is not None else 0.0
+            p_rain_mm = float(raw_rain) if raw_rain is not None else 0.0
+
+            # SEDIMENT MATH: Area * Depth * K-Factor
+            rain_depth_m = (p_rain_mm * 24) / 1000.0  # Assuming 24h peak storm equivalent
+            k_factor = 0.35  # proxy for highly erodible loams/silts
+            sediment_yield_m3 = h_area_m2 * rain_depth_m * k_factor
+
+            basin_results.append({
+                'HUC12_ID': huc12_id,
+                'Basin Name': name,
+                'Hazard Area (Acres)': h_area_m2 * 0.000247105,
+                'Peak Rain (mm/hr)': p_rain_mm,
+                'Sediment Yield (m³)': sediment_yield_m3
+            })
+
+        df_results = pd.DataFrame(basin_results)
+        df_results = df_results.sort_values(by='Sediment Yield (m³)', ascending=False)
+
+        # 5. Render Page 3 UI
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown("### Watershed Matrix")
+            st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
+            st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils.")
+
+        with col2:
+            st.markdown("### Basin Choropleth & Stream Routing")
+            # Prepare GeoPandas for Folium Choropleth
+            gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
+            gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+
+            m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
+
+            # Render Choropleth
+            folium.Choropleth(
+                geo_data=gdf,
+                name='Sediment Yield',
+                data=df_results,
+                columns=['HUC12_ID', 'Sediment Yield (m³)'],
+                key_on='feature.properties.huc12',
+                fill_color='YlOrRd',
+                fill_opacity=0.7,
+                line_opacity=0.3,
+                legend_name='Estimated Sediment Yield (Cubic Meters)'
+            ).add_to(m3)
+
+            # Rasterize and Overlay WWF Stream Routing
+            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
+            streams_img = ee.Image(0).mask(0).paint(streams, 1, 1)
+            stream_vis = streams_img.getMapId({'palette': ['#3498db']})
+            folium.TileLayer(tiles=stream_vis['tile_fetcher'].url_format, attr='WWF', name='Stream Routing', overlay=True).add_to(m3)
+
+            # Interactive Tooltips
+            tooltip = folium.GeoJsonTooltip(
+                fields=['name', 'Sediment Yield (m³)'],
+                aliases=['Basin:', 'Est. Yield (m³):'],
+                localize=True
+            )
+            folium.GeoJson(
+                gdf,
+                style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent'},
+                tooltip=tooltip
+            ).add_to(m3)
+
+            st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
