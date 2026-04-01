@@ -133,7 +133,6 @@ elif page == "2. Spatial Modeling Lab":
 
     show_risk = st.sidebar.checkbox("Hazard Intersection (Risk)", value=True)
     show_slope = st.sidebar.checkbox("Topographic Velocity (Slope)", value=False)
-    # Phase 3 Feature: Concavity Toggle
     show_concavity = st.sidebar.checkbox("Topographic Concavity (Hollows)", value=False) 
     show_severity = st.sidebar.checkbox("Burn Severity (dNBR)", value=False)
     show_soils = st.sidebar.checkbox("Soil Erodibility (K-Factor)", value=False)
@@ -145,11 +144,9 @@ elif page == "2. Spatial Modeling Lab":
         slope = ee.Terrain.slope(dem).clip(area)
         slope_mask = slope.gte(SLOPE_LIMIT)
 
-        # --- PHASE 3 FEATURE: TOPOGRAPHIC CONCAVITY KERNEL ---
-        # A pixel is concave (a hollow) if its elevation is significantly lower than its surroundings.
+        # Topographic Concavity Kernel
         kernel = ee.Kernel.circle(radius=90, units='meters')
         local_mean = dem.reduceNeighborhood(reducer=ee.Reducer.mean(), kernel=kernel).clip(area)
-        # We look for areas at least 2 meters deeper than their local average
         concavity_mask = dem.subtract(local_mean).lt(-2) 
 
         s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
@@ -159,7 +156,7 @@ elif page == "2. Spatial Modeling Lab":
 
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
         
-        # Hazard Intersection now includes the Concavity Physics
+        # Hazard Intersection with Concavity
         hazard_intersection = slope_mask.And(concavity_mask).And(severity_mask).And(erodible_soils).selfMask()
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -267,7 +264,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
             st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils. *Note: Area calculation utilizes the Topographic Concavity filter to isolate zero-order basins.*")
             
-            # Executive Export Button 
+            # Executive Export Button
             st.markdown("---")
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             clean_fire_name = selected_fire.replace(" ", "_")
@@ -280,7 +277,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 use_container_width=True
             )
 
-            # Stream Transport Explanation 
+            # Stream Transport Explanation
             st.markdown("---")
             st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Average Long-Term Discharge** (Flow Accumulation proxy). \n* **Thin / Cyan:** Headwater streams (low discharge).\n* **Thick / Navy:** Major transport arteries (massive discharge). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
 
@@ -312,4 +309,34 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
                 log_dis = discharge.log10()
                 line_width = log_dis.multiply(1.5).add(0.5)
-               return f.set('acc_width', line_width).set('acc_color', log_dis)
+                return f.set('acc_width', line_width).set('acc_color', log_dis)
+
+            styled_streams = streams.map(style_streams)
+            stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
+            
+            stream_vis = stream_img.getMapId({
+                'min': 0, 
+                'max': 2.5, 
+                'palette': ['#00b4d8', '#0077b6', '#03045e'] 
+            })
+            
+            folium.TileLayer(
+                tiles=stream_vis['tile_fetcher'].url_format, 
+                attr='WWF', 
+                name='Stream Transport (Discharge)', 
+                overlay=True
+            ).add_to(m3)
+
+            # Interactive Tooltips
+            tooltip = folium.GeoJsonTooltip(
+                fields=['name', 'Sediment Yield (m³)'],
+                aliases=['Basin:', 'Est. Yield (m³):'],
+                localize=True
+            )
+            folium.GeoJson(
+                gdf,
+                style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent'},
+                tooltip=tooltip
+            ).add_to(m3)
+
+            st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
