@@ -37,7 +37,7 @@ if 'ee_initialized' not in st.session_state:
 @st.cache_data
 def load_and_clean_data():
     # Update this path to match your local environment
-    path = '/Users/anthonybrandi/Desktop/All Da Folders/QGIS/Senior Project/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view/CA_Perimeters_CAL_FIRE_NIFC_FIRIS_public_view.shp'
+    path = 'Master_Fire_Dataset.geojson.zip'
     try:
         fires = gpd.read_file(path)
         fires = fires.dissolve(by='incident_n').reset_index()
