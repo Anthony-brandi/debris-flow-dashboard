@@ -234,7 +234,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
             st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils.")
             
-            # Executive Export Button (WITH UNIQUE KEY FIX)
+            # Executive Export Button
             st.markdown("---")
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             clean_fire_name = selected_fire.replace(" ", "_")
@@ -247,9 +247,9 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 use_container_width=True
             )
 
-            # Stream Transport Explanation
+            # Stream Transport Explanation (Updated for Discharge)
             st.markdown("---")
-            st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Upstream Drainage Area** (Flow Accumulation). \n* **Thin / Cyan:** Headwater streams (low accumulation).\n* **Thick / Navy:** Major transport arteries (massive accumulation). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
+            st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Average Long-Term Discharge** (Flow Accumulation proxy). \n* **Thin / Cyan:** Headwater streams (low discharge).\n* **Thick / Navy:** Major transport arteries (massive discharge). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
 
         with col2:
             st.markdown("### Basin Choropleth & Stream Transport")
@@ -272,28 +272,29 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 legend_name='Estimated Sediment Yield (Cubic Meters)'
             ).add_to(m3)
 
-            # PHASE 3 FEATURE: VECTOR FLOW ACCUMULATION (SMOOTH TRANSPORT)
+            # --- PHASE 3 FEATURE: VECTOR FLOW ACCUMULATION (DISCHARGE FIX) ---
             streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
             
             def style_streams(f):
-                up_area = ee.Number(f.get('UP_AREA')).add(1) 
-                log_area = up_area.log10()
-                line_width = log_area.multiply(1.2).add(0.5)
-                return f.set('acc_width', line_width).set('acc_color', log_area)
+                # Using DIS_AV_CMS (Discharge) which is natively supported and directly correlates to accumulation
+                discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
+                log_dis = discharge.log10()
+                line_width = log_dis.multiply(1.5).add(0.5)
+                return f.set('acc_width', line_width).set('acc_color', log_dis)
 
             styled_streams = streams.map(style_streams)
             stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
             
             stream_vis = stream_img.getMapId({
                 'min': 0, 
-                'max': 4, 
+                'max': 2.5, # Scales perfectly for regional river volumes
                 'palette': ['#00b4d8', '#0077b6', '#03045e'] 
             })
             
             folium.TileLayer(
                 tiles=stream_vis['tile_fetcher'].url_format, 
                 attr='WWF', 
-                name='Stream Transport (Upstream Area)', 
+                name='Stream Transport (Discharge)', 
                 overlay=True
             ).add_to(m3)
 
