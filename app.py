@@ -37,24 +37,23 @@ if 'ee_initialized' not in st.session_state:
         st.error(f"Earth Engine Initialization Error: {e}")
 
 # ==========================================
-# 3. ROBUST CLOUD DATA LOADER
+# 3. CACHE-BUSTING CLOUD DATA LOADER
 # ==========================================
+# Renamed function to force Streamlit to clear its memory
 @st.cache_data
-def load_and_clean_data():
+def fetch_and_extract_fire_data():
     zip_path = 'Master_Fire_Dataset.geojson.zip'
-    extract_dir = 'temp_fire_data'
+    extract_dir = 'temp_fire_data_v2' # Renamed folder to force a fresh extraction
     
     try:
-        # Step 1: Unzip the file programmatically, ignoring hidden Mac folders
         if not os.path.exists(extract_dir):
             os.makedirs(extract_dir)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 for member in zip_ref.namelist():
-                    # Only extract the actual geojson, ignore __MACOSX
+                    # Only extract the actual geojson, ignore hidden Mac files
                     if not member.startswith('__MACOSX') and member.endswith('.geojson'):
                         zip_ref.extract(member, extract_dir)
         
-        # Step 2: Find the extracted file and load it
         for file in os.listdir(extract_dir):
             if file.endswith('.geojson'):
                 geojson_path = os.path.join(extract_dir, file)
@@ -71,7 +70,7 @@ def load_and_clean_data():
 # ==========================================
 # GLOBAL FIRE SELECTION & DATE PARSING
 # ==========================================
-cal_fires = load_and_clean_data()
+cal_fires = fetch_and_extract_fire_data()
 
 if not cal_fires.empty:
     fire_list = sorted(cal_fires['incident_n'].fillna(cal_fires['mission']).dropna().unique())
@@ -124,7 +123,7 @@ if page == "1. Incident Briefing":
     st_folium(m, use_container_width=True, height=500)
 
 # ==========================================
-# PAGE 2: SPATIAL MODELING LAB
+# PAGE 2: SPATIAL Modeling Lab
 # ==========================================
 elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
@@ -158,12 +157,10 @@ elif page == "2. Spatial Modeling Lab":
 
     with st.spinner("Compiling Spatial Intersection Data via Earth Engine..."):
         
-        # 1. TOPOGRAPHIC VELOCITY (SLOPE)
         dem = ee.Image("USGS/SRTMGL1_003")
         slope = ee.Terrain.slope(dem).clip(area)
         slope_mask = slope.gte(SLOPE_LIMIT)
 
-        # 2. BURN SEVERITY (dNBR)
         s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
         s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).map(mask_s2_clouds).median().clip(area)
         
@@ -172,21 +169,17 @@ elif page == "2. Spatial Modeling Lab":
         dnbr = pre_nbr.subtract(post_nbr)
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        # 3. SOIL ERODIBILITY
         raw_soil = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area)
         erodible_soils = raw_soil.lt(11).selfMask() 
 
-        # HAZARD INTERSECTION
         hazard_intersection = slope_mask.And(severity_mask).And(erodible_soils).selfMask()
 
-        # RASTERIZED VECTORS
         roads = ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area)
         roads_img = ee.Image(0).mask(0).paint(roads, 1, 2)
         
         streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
         streams_img = ee.Image(0).mask(0).paint(streams, 1, 1)
 
-        # MAP RENDER
         m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
         folium.GeoJson(fire_data.geometry, style_function=lambda x: {'fillColor': 'transparent', 'color': 'white', 'weight': 2, 'dashArray': '5, 5'}).add_to(m2)
 
@@ -221,7 +214,6 @@ elif page == "2. Spatial Modeling Lab":
         </div>"""
         m2.get_root().html.add_child(folium.Element(legend_html))
         
-        # The map will now redraw smoothly just by toggling visibility layers
         toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_severity}{show_soils}{show_streams}{show_roads}"
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
