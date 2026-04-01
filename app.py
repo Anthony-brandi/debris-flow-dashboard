@@ -246,11 +246,35 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 use_container_width=True
             )
 
+       # 5. Render Page 3 UI
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown("### Watershed Matrix")
+            st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
+            st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils.")
+            
+            # Executive Export Button
+            st.markdown("---")
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            clean_fire_name = selected_fire.replace(" ", "_")
+            st.download_button(
+                label="📥 Download Executive Report (CSV)",
+                data=csv_data,
+                file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+            # --- NEW: Stream Transport Explanation ---
+            st.markdown("---")
+            st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Upstream Drainage Area** (Flow Accumulation). \n* **Thin / Cyan:** Headwater streams (low accumulation).\n* **Thick / Navy:** Major transport arteries (massive accumulation). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
+
         with col2:
             st.markdown("### Basin Choropleth & Stream Transport")
             
             gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
-            gdf.set_crs(epsg=4326, inplace=True) # The vital CRS fix!
+            gdf.set_crs(epsg=4326, inplace=True)
             gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
             m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
@@ -267,24 +291,35 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 legend_name='Estimated Sediment Yield (Cubic Meters)'
             ).add_to(m3)
 
-            # --- PHASE 3 FEATURE: FLOW ACCUMULATION (TRANSPORT) ---
-            # We use a logarithmic scale because flow accumulation grows exponentially downstream
-            flow_acc = ee.Image("WWF/HydroSHEDS/15ACC").clip(area)
-            flow_acc_log = flow_acc.log10()
+            # --- PHASE 3 FEATURE: VECTOR FLOW ACCUMULATION (SMOOTH TRANSPORT) ---
+            # Using WWF FreeFlowingRivers vector dataset for smooth line rendering
+            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
             
-            # Mask out tiny ephemeral streams (values < 2.0 in log scale)
-            flow_mask = flow_acc_log.gte(2.0)
+            # Calculate dynamic width and color based on Upstream Drainage Area (UP_AREA)
+            def style_streams(f):
+                # Add 1 to avoid log10(0) errors. UP_AREA is in square kilometers.
+                up_area = ee.Number(f.get('UP_AREA')).add(1) 
+                log_area = up_area.log10()
+                # Width: Scale the log value to make lines between 0.5px and 4px thick
+                line_width = log_area.multiply(1.2).add(0.5)
+                return f.set('acc_width', line_width).set('acc_color', log_area)
+
+            styled_streams = streams.map(style_streams)
             
-            stream_vis = flow_acc_log.updateMask(flow_mask).getMapId({
-                'min': 2, 
-                'max': 5,
-                'palette': ['#00b4d8', '#0077b6', '#03045e'] # Scales from bright blue to dark navy
+            # Paint the vectors onto a blank image. 
+            # arg 1: the styled collection | arg 2: property dictating color | arg 3: property dictating width
+            stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
+            
+            stream_vis = stream_img.getMapId({
+                'min': 0, 
+                'max': 4, # Max log10 area roughly equates to 10,000 sq km
+                'palette': ['#00b4d8', '#0077b6', '#03045e'] # Bright cyan to dark navy
             })
             
             folium.TileLayer(
                 tiles=stream_vis['tile_fetcher'].url_format, 
                 attr='WWF', 
-                name='Flow Accumulation Transport', 
+                name='Stream Transport (Upstream Area)', 
                 overlay=True
             ).add_to(m3)
 
