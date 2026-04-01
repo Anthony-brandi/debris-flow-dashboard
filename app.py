@@ -239,7 +239,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             clean_fire_name = selected_fire.replace(" ", "_")
             st.download_button(
-                label="📥 Download Executive Report (CSV)",
+                label=" Download Executive Report (CSV)",
                 data=csv_data,
                 file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
                 mime="text/csv",
