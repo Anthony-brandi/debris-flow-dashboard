@@ -29,13 +29,14 @@ if 'ee_initialized' not in st.session_state:
         if "EARTHENGINE_JSON" in st.secrets:
             creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
             credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
-            ee.Initialize(credentials, project='strange-bird-461405-v7')
+            # UPDATE PROJECT ID HERE
+            ee.Initialize(credentials, project='gee-streamlit-app-490500')
         else:
-            ee.Initialize(project='strange-bird-461405-v7')
+            # AND HERE
+            ee.Initialize(project='gee-streamlit-app-490500')
         st.session_state['ee_initialized'] = True
     except Exception as e:
         st.error(f"Earth Engine Initialization Error: {e}")
-
 # ==========================================
 # 3. CACHE-BUSTING CLOUD DATA LOADER
 # ==========================================
