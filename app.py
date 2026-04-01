@@ -39,18 +39,16 @@ if 'ee_initialized' not in st.session_state:
 # ==========================================
 # 3. CACHE-BUSTING CLOUD DATA LOADER
 # ==========================================
-# Renamed function to force Streamlit to clear its memory
 @st.cache_data
 def fetch_and_extract_fire_data():
     zip_path = 'Master_Fire_Dataset.geojson.zip'
-    extract_dir = 'temp_fire_data_v2' # Renamed folder to force a fresh extraction
+    extract_dir = 'temp_fire_data_v3'
     
     try:
         if not os.path.exists(extract_dir):
             os.makedirs(extract_dir)
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 for member in zip_ref.namelist():
-                    # Only extract the actual geojson, ignore hidden Mac files
                     if not member.startswith('__MACOSX') and member.endswith('.geojson'):
                         zip_ref.extract(member, extract_dir)
         
@@ -73,9 +71,17 @@ def fetch_and_extract_fire_data():
 cal_fires = fetch_and_extract_fire_data()
 
 if not cal_fires.empty:
-    fire_list = sorted(cal_fires['incident_n'].fillna(cal_fires['mission']).dropna().unique())
+    # --- THE KEYERROR FIX ---
+    # Safely extract the fire name without assuming 'mission' exists
+    name_col = 'incident_n' if 'incident_n' in cal_fires.columns else cal_fires.columns[0]
+    fire_series = cal_fires[name_col]
+    
+    if 'mission' in cal_fires.columns:
+        fire_series = fire_series.fillna(cal_fires['mission'])
+        
+    fire_list = sorted(fire_series.dropna().astype(str).unique())
     selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", fire_list)
-    fire_data = cal_fires[cal_fires['incident_n'] == selected_fire]
+    fire_data = cal_fires[cal_fires[name_col] == selected_fire]
     
     # Dynamic Ignition Date Extractor
     ignition_date = datetime(2021, 1, 1) # Fallback
@@ -87,7 +93,7 @@ if not cal_fires.empty:
             except Exception:
                 continue
 
-    # Sentinel-2 Time Windows (Pre-fire: 1 year before, Post-fire: 3-6 months after)
+    # Sentinel-2 Time Windows
     pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
     pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
     post_fire_start = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
@@ -123,7 +129,7 @@ if page == "1. Incident Briefing":
     st_folium(m, use_container_width=True, height=500)
 
 # ==========================================
-# PAGE 2: SPATIAL Modeling Lab
+# PAGE 2: SPATIAL MODELING LAB
 # ==========================================
 elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
