@@ -312,4 +312,4 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
                 log_dis = discharge.log10()
                 line_width = log_dis.multiply(1.5).add(0.5)
-                return f.set('acc_width', line_width).set('acc_
+               return f.set('acc_width', line_width).set('acc_color', log_dis)
