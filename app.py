@@ -56,7 +56,7 @@ if 'ee_initialized' not in st.session_state:
         st.error(f"Earth Engine Initialization Error: {e}")
 
 # ==========================================
-# 4. ROBUST CLOUD DATA LOADER (UPDATED TO COMBINE MULTIPLE FILES)
+# 4. ROBUST CLOUD DATA LOADER (UPGRADED FOR DYNAMIC COLUMNS)
 # ==========================================
 @st.cache_data
 def fetch_and_extract_fire_data():
@@ -76,6 +76,14 @@ def fetch_and_extract_fire_data():
             if file.endswith('.geojson'):
                 geojson_path = os.path.join(extract_dir, file)
                 fires = gpd.read_file(geojson_path)
+                
+                # DYNAMIC COLUMN DISCOVERY: Find whatever this specific file calls the fire name
+                possible_names = ['incident_n', 'FIRE_NAME', 'Fire_Name', 'Name', 'name', 'mission']
+                actual_name_col = next((col for col in possible_names if col in fires.columns), fires.columns[0])
+                
+                # Standardize the column name to 'incident_n' so the app logic stays perfectly intact
+                fires = fires.rename(columns={actual_name_col: 'incident_n'})
+                
                 fires = fires.dissolve(by='incident_n').reset_index()
                 gdfs.append(fires.to_crs(epsg=4326))
                 
