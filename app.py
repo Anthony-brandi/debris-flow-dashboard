@@ -167,7 +167,6 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        # BUG FIX: Inject a fully masked dummy image to prevent empty collection errors
         dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
         
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
@@ -182,12 +181,11 @@ elif page == "2. Spatial Modeling Lab":
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        # BUG FIX: Standardize band names and use robust sum to prevent ghost band corruption
-        slope_safe = slope_mask.unmask(0).rename('risk').toInt()
-        sev_safe = severity_mask.unmask(0).rename('risk').toInt()
-        soil_safe = soil_risk_mask.unmask(0).rename('risk').toInt()
+        slope_safe = slope_mask.unmask(0).toInt()
+        sev_safe = severity_mask.unmask(0).toInt()
+        soil_safe = soil_risk_mask.unmask(0).toInt()
 
-        risk_score = ee.ImageCollection([slope_safe, sev_safe, soil_safe]).sum()
+        risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -215,13 +213,14 @@ elif page == "2. Spatial Modeling Lab":
         C_STREAMS = '#3498db'
         C_ROADS = '#2ecc71'
 
-        if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE],'opacity':0.4})['tile_fetcher'].url_format, attr='USGS', name='Slope').add_to(m2)
-        if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY],'opacity':0.6})['tile_fetcher'].url_format, attr='USGS', name='Concavity').add_to(m2)
-        if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY],'opacity':0.4})['tile_fetcher'].url_format, attr='ESA', name='Severity').add_to(m2)
-        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'min': 10, 'max': 80, 'palette': ['#f4a460', '#d2691e', '#8b4513'], 'opacity': 0.7})['tile_fetcher'].url_format, attr='Soil', name='Soils').add_to(m2)
+        # FIX: Opacity arguments moved out of Earth Engine getMapId() and into Folium TileLayer()
+        if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE]})['tile_fetcher'].url_format, attr='USGS', name='Slope', opacity=0.4).add_to(m2)
+        if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY]})['tile_fetcher'].url_format, attr='USGS', name='Concavity', opacity=0.6).add_to(m2)
+        if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY]})['tile_fetcher'].url_format, attr='ESA', name='Severity', opacity=0.4).add_to(m2)
+        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'min': 10, 'max': 80, 'palette': ['#f4a460', '#d2691e', '#8b4513']})['tile_fetcher'].url_format, attr='Soil', name='Soils', opacity=0.7).add_to(m2)
         if show_streams: folium.TileLayer(tiles=streams_img.getMapId({'palette':[C_STREAMS]})['tile_fetcher'].url_format, attr='WWF', name='Streams').add_to(m2)
         if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':[C_ROADS]})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
-        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'min': 1, 'max': 1, 'palette':[C_RISK],'opacity':0.8})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
+        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'min': 1, 'max': 1, 'palette':[C_RISK]})['tile_fetcher'].url_format, attr='GEE', name='Risk', opacity=0.8).add_to(m2)
 
         legend_items = []
         if show_risk: legend_items.append(f'<i style="background:{C_RISK}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>')
@@ -265,7 +264,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        # BUG FIX: Inject the dummy image here as well
         dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
         
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
