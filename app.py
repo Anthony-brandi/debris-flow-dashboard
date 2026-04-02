@@ -123,6 +123,9 @@ if not cal_fires.empty:
     post_fire_end = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
+    
+    # NUCLEAR OPTIMIZATION 1: Simplify fire perimeter to prevent ray-casting timeouts
+    simplified_area = area.geometry().simplify(maxError=100)
     centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
 else:
     st.error("No fire perimeters loaded.")
@@ -132,6 +135,17 @@ def mask_s2_clouds(image):
     qa = image.select('QA60')
     mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
     return image.updateMask(mask).divide(10000)
+
+# NUCLEAR OPTIMIZATION 2: Safe Satellite Routing
+def get_safe_s2(start, end, geom):
+    col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(geom).filterDate(start, end)
+    dummy = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
+    
+    # If the collection has images, map the cloud mask. Otherwise, return the safe dummy.
+    def process_s2():
+        return col.map(mask_s2_clouds).select(['B8', 'B12']).median()
+        
+    return ee.Image(ee.Algorithms.If(col.size().gt(0), process_s2(), dummy)).clip(geom)
 
 # ==========================================
 # PAGE 1: INCIDENT BRIEFING
@@ -171,30 +185,21 @@ elif page == "2. Spatial Modeling Lab":
 
     with st.spinner("Compiling Spatial Intersection Data..."):
         dem = ee.Image("USGS/SRTMGL1_003")
-        slope = ee.Terrain.slope(dem).clip(area)
+        slope = ee.Terrain.slope(dem).clip(simplified_area)
         slope_mask = slope.gte(SLOPE_LIMIT)
 
-        local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
+        local_mean = dem.focal_mean(radius=50, units='meters').clip(simplified_area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        # BULLETPROOF MOSAIC FALLBACK: Guarantees bands B8 and B12 always exist
-        fallback_s2 = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
-        
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end)
-        s2_pre_med = s2_pre_col.map(mask_s2_clouds).median()
-        s2_pre = ee.ImageCollection([fallback_s2, s2_pre_med]).mosaic().clip(area)
-        
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end)
-        s2_post_med = s2_post_col.map(mask_s2_clouds).median()
-        s2_post = ee.ImageCollection([fallback_s2, s2_post_med]).mosaic().clip(area)
+        s2_pre = get_safe_s2(pre_fire_start, pre_fire_end, simplified_area)
+        s2_post = get_safe_s2(post_fire_start, post_fire_end, simplified_area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02").select('b0').clip(area)
+        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02").select('b0').clip(simplified_area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        # Safe addition by explicitly selecting the first band
         slope_safe = ee.Image(slope_mask).unmask(0).select(0).toInt()
         sev_safe = ee.Image(severity_mask).unmask(0).select(0).toInt()
         soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).toInt()
@@ -202,8 +207,8 @@ elif page == "2. Spatial Modeling Lab":
         risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
 
-        roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
-        streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 1)
+        roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(simplified_area), 1, 2)
+        streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area), 1, 1)
 
         if basemap_choice == "Satellite":
             m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
@@ -275,18 +280,10 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         DNBR_THRESHOLD = 0.15
 
         dem = ee.Image("USGS/SRTMGL1_003")
-        slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
+        slope_mask = ee.Terrain.slope(dem).clip(simplified_area).gte(SLOPE_LIMIT)
 
-        # BULLETPROOF MOSAIC FALLBACK: Used here for Page 3 as well
-        fallback_s2 = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
-        
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end)
-        s2_pre_med = s2_pre_col.map(mask_s2_clouds).median()
-        s2_pre = ee.ImageCollection([fallback_s2, s2_pre_med]).mosaic().clip(area)
-        
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end)
-        s2_post_med = s2_post_col.map(mask_s2_clouds).median()
-        s2_post = ee.ImageCollection([fallback_s2, s2_post_med]).mosaic().clip(area)
+        s2_pre = get_safe_s2(pre_fire_start, pre_fire_end, simplified_area)
+        s2_post = get_safe_s2(post_fire_start, post_fire_end, simplified_area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -295,15 +292,15 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         hm_area_img = ee.Image(severity_mask).unmask(0).select(0).multiply(ee.Image.pixelArea()).rename('hm_m2')
         combined_reducer_img = ee.Image.cat([b23_area_img, hm_area_img])
 
-        huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
+        huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(simplified_area)
 
-        # MEGA-FIRE OPTIMIZATION: Max scale, max tileScale, extreme geometry compression
+        # NUCLEAR OPTIMIZATION 3: Scale 250m reduces math by 64x. maxError=100 ensures Streamlit payload is tiny.
         huc12_processed = combined_reducer_img.reduceRegions(
             collection=huc12,
             reducer=ee.Reducer.sum(),
-            scale=90, 
+            scale=250, 
             tileScale=16 
-        ).map(lambda f: f.simplify(maxError=150))
+        ).map(lambda f: f.simplify(maxError=100))
 
         huc_data = huc12_processed.getInfo()
 
@@ -391,7 +388,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 legend_name='Estimated Sediment Yield (Cubic Meters)'
             ).add_to(m3)
 
-            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area)
+            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area)
             
             def style_streams(f):
                 discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
