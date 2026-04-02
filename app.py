@@ -27,14 +27,6 @@ page = st.sidebar.radio("Select Module:", [
 # 2. ISOLATED DEBRIS FLOW MATH ENGINE
 # ==========================================
 def calculate_gartner_volume(b23_m2, hm_m2, r15_mmhr):
-    """
-    USGS Gartner et al. (2014) Empirical Debris Flow Volume Model
-    Equation: ln(V) = 4.22 + 0.13*ln(B23) + 0.36*ln(R15) + 0.39*sqrt(HM)
-    V = Volume (m3)
-    B23 = Basin area with slope >= 23 degrees (km2)
-    HM = Basin area with High/Moderate burn severity (km2)
-    R15 = Peak 15-min rainfall intensity (mm/hr)
-    """
     b23_km2 = (b23_m2 / 1_000_000) if b23_m2 else 0.0
     hm_km2 = (hm_m2 / 1_000_000) if hm_m2 else 0.0
     r15 = float(r15_mmhr)
@@ -180,11 +172,15 @@ elif page == "2. Spatial Modeling Lab":
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        # UPDATED: Continuous Sand Mass Fraction (Erodibility Proxy)
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
-        soil_risk_mask = erodible_soils.gte(40) # Binary mask for risk score addition
+        soil_risk_mask = erodible_soils.gte(40) 
         
-        risk_score = slope_mask.add(severity_mask).add(soil_risk_mask)
+        # BUG FIX: Safely unmask and convert to integers to prevent Null-propagation errors
+        slope_safe = slope_mask.unmask(0).toInt()
+        sev_safe = severity_mask.unmask(0).toInt()
+        soil_safe = soil_risk_mask.unmask(0).toInt()
+
+        risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -268,8 +264,9 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        b23_area_img = slope_mask.multiply(ee.Image.pixelArea()).rename('b23_m2')
-        hm_area_img = severity_mask.multiply(ee.Image.pixelArea()).rename('hm_m2')
+        # BUG FIX: Ensure the reducer imagery is safely unmasked before zone extraction
+        b23_area_img = slope_mask.unmask(0).multiply(ee.Image.pixelArea()).rename('b23_m2')
+        hm_area_img = severity_mask.unmask(0).multiply(ee.Image.pixelArea()).rename('hm_m2')
         combined_reducer_img = ee.Image.cat([b23_area_img, hm_area_img])
 
         huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
@@ -415,22 +412,31 @@ elif page == "4. Documentation & Methodology":
     st.title("System Documentation & Scientific Methodology")
     st.markdown("---")
     
-    # UPDATED: Split Page 4 into structured tabs
-    tab1, tab2 = st.tabs(["Operational User Guide", "Scientific Methodology"])
+    tab1, tab2 = st.tabs(["📘 Operational User Guide", "🔬 Scientific Methodology"])
     
     with tab1:
+        st.markdown("### Incident Command Workflow")
+        
+        # Added a clean, public domain image representing post-fire debris flows
+        st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/15/Debris_flow.jpg/800px-Debris_flow.jpg", caption="Debris flow inundation zone.", use_container_width=True)
+        
+        st.info("**Overview:** The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events.")
+
         st.markdown("""
-        ### Incident Command Workflow
-        The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events. 
+        #### 📍 Step 1: Select the Incident
+        Navigate to the **Incident Briefing** or **Spatial Modeling Lab** using the sidebar to select a specific fire perimeter from the master dataset. Ensure the fire perimeter and ignition dates align with current incident records.
 
-        **Step 1: Select the Incident**
-        Navigate to the **Incident Briefing** or **Spatial Modeling Lab** to select a specific fire perimeter from the master dataset. Ensure the fire perimeter and ignition dates align with current incident records.
+        #### 🌧️ Step 2: Simulate Predictive Rainfall
+        Navigate to **Phase 3: Watershed Loading**. Utilize the Operational Weather Inputs sidebar to input the anticipated **Peak 15-minute Rainfall Intensity (mm/hr)** for upcoming storm systems. 
+        """)
+        
+        st.warning("*Note: CAL FIRE baseline evaluations typically begin at 24mm/hr. Higher values should be used to simulate intense atmospheric river events.*")
 
-        **Step 2: Simulate Predictive Rainfall**
-        Navigate to **Phase 3: Watershed Loading**. Utilize the Operational Weather Inputs sidebar to input the anticipated Peak 15-minute Rainfall Intensity (mm/hr) for upcoming storm systems. *Note: CAL FIRE baseline evaluations typically begin at 24mm/hr.*
-
-        **Step 3: Export Operational Data**
-        Once the Earth Engine completes the HUC-12 basin calculations, utilize the export buttons to download the Executive Report (CSV) for quantitative review, and the Operational Polygons (GeoJSON) for direct integration into local offline GIS systems or evacuation routing software.
+        st.markdown("""
+        #### 💾 Step 3: Export Operational Data
+        Once the Earth Engine completes the HUC-12 basin calculations, utilize the export buttons to download:
+        * **Executive Report (CSV):** For quantitative review and rapid triage by the WERT team.
+        * **Operational Polygons (GeoJSON):** For direct integration into local offline GIS systems or evacuation routing software.
         """)
 
     with tab2:
@@ -443,13 +449,13 @@ elif page == "4. Documentation & Methodology":
             **1. Topographic Velocity (Critical Slope)**
             * **Data:** USGS SRTM DEM, 30m.
             * **Threshold:** $\ge$ 23 Degrees
-            * **Source:** *Staley, D. M., et al. (2017). Prediction of spatially explicit objective hazard classifications for post-fire debris flows. Landslides, 14(3), 1029-1043.*
+            * **Source:** [Staley, D. M., et al. (2017)](https://doi.org/10.1007/s10346-016-0761-9). *Prediction of spatially explicit objective hazard classifications for post-fire debris flows. Landslides, 14(3), 1029-1043.*
             * **Justification:** Establishes the statistical threshold where gravitational forces reliably overcome soil friction for debris flow initiation.
             
             **2. Topographic Concavity (Initiation Points)**
             * **Data:** USGS SRTM DEM (50m focal mean kernel).
             * **Threshold:** Local elevation < -3m relative to neighborhood.
-            * **Source:** *Rengers, F. K., et al. (2016). The influence of topography on post-fire debris flow initiation.*
+            * **Source:** [Rengers, F. K., et al. (2016)](https://doi.org/10.1002/2015GL067035). *The influence of topography on post-fire debris flow initiation.*
             """)
             
         with col2:
@@ -457,7 +463,7 @@ elif page == "4. Documentation & Methodology":
             **3. Burn Severity (dNBR)**
             * **Data:** Copernicus Sentinel-2 Multispectral, 10m.
             * **Threshold:** dNBR > 0.15 (Moderate to High Severity).
-            * **Source:** *Key, C. H., & Benson, N. C. (2006). Landscape assessment. FIREMON: Fire effects monitoring and inventory system.*
+            * **Source:** [Key, C. H., & Benson, N. C. (2006)](https://doi.org/10.2737/RMRS-GTR-164). *Landscape assessment. FIREMON: Fire effects monitoring and inventory system.*
             * **Justification:** Establishes the spectral thresholds where dNBR values transition into moderate severity, amplifying hydrophobic runoff.
 
             **4. Soil Erodibility**
@@ -468,12 +474,12 @@ elif page == "4. Documentation & Methodology":
 
         st.markdown("---")
         st.markdown("### Watershed Loading & Sediment Yield")
-        st.markdown("""
-        The system quantifies hazard volumes by extracting zonal geometry from the spatial layers and applying the USGS Post-Fire Debris-Flow hazard assessment models within HUC-12 watershed boundaries. 
+        st.success("The system quantifies hazard volumes by extracting zonal geometry from the spatial layers and applying the USGS Post-Fire Debris-Flow hazard assessment models within HUC-12 watershed boundaries.")
 
+        st.markdown("""
         **The Math Engine:**
         * **Model:** USGS Empirical Logistic Regression.
-        * **Source:** *Gartner, J. E., Cannon, S. H., & Santi, P. M. (2014). Empirical models for predicting volumes of sediment deposited by debris flows and sediment-laden floods in the transverse ranges of southern California. Engineering Geology, 176, 45-56.*
+        * **Source:** [Gartner, J. E., Cannon, S. H., & Santi, P. M. (2014)](https://doi.org/10.1016/j.enggeo.2014.02.012). *Empirical models for predicting volumes of sediment deposited by debris flows... Engineering Geology, 176, 45-56.*
         * **Equation:** $\ln(V) = 4.22 + 0.13 \ln(B23) + 0.36 \ln(R15) + 0.39 \sqrt{HM}$
             * $V$: Total Debris Flow Volume ($m^3$)
             * $B23$: Basin area with slope $\ge$ 23° ($km^2$)
