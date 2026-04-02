@@ -110,7 +110,6 @@ if not cal_fires.empty:
     pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
     pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
     post_fire_start = (ignition_date + timedelta(days=1)).strftime('%Y-%m-%d')
-    # Expanded search window to 90 days to ensure imagery is captured
     post_fire_end = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
@@ -168,9 +167,14 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        # Removed the strict tile-wide cloud filter to prevent empty image collections
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds).median().clip(area)
+        # BUG FIX: Inject a fully masked dummy image to prevent empty collection errors
+        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
+        
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
+        
+        s2_pre = s2_pre_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
+        s2_post = s2_post_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -178,12 +182,12 @@ elif page == "2. Spatial Modeling Lab":
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        # Select the first band to ensure pure addition compatibility
-        slope_safe = slope_mask.select(0).unmask(0).toInt()
-        sev_safe = severity_mask.select(0).unmask(0).toInt()
-        soil_safe = soil_risk_mask.select(0).unmask(0).toInt()
+        # BUG FIX: Standardize band names and use robust sum to prevent ghost band corruption
+        slope_safe = slope_mask.unmask(0).rename('risk').toInt()
+        sev_safe = severity_mask.unmask(0).rename('risk').toInt()
+        soil_safe = soil_risk_mask.unmask(0).rename('risk').toInt()
 
-        risk_score = slope_safe.add(sev_safe).add(soil_safe)
+        risk_score = ee.ImageCollection([slope_safe, sev_safe, soil_safe]).sum()
         hazard_intersection = risk_score.gte(2).selfMask() 
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -261,9 +265,14 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        # Removed the strict tile-wide cloud filter here as well
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds).median().clip(area)
+        # BUG FIX: Inject the dummy image here as well
+        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
+        
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
+        
+        s2_pre = s2_pre_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
+        s2_post = s2_post_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
