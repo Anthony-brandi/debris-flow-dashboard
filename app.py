@@ -167,14 +167,15 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        # BULLETPROOF SATELLITE FALLBACK
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
+        # BULLETPROOF SATELLITE FALLBACK: Includes B8, B12, AND the QA60 cloud band
+        dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
         
-        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12'])
+        # Merge the dummy image FIRST so the mask_s2_clouds function never fails
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).merge(ee.ImageCollection([dummy_s2]))
         
-        s2_pre = ee.Image(ee.Algorithms.If(s2_pre_col.size().gt(0), s2_pre_col.median(), dummy_s2)).clip(area)
-        s2_post = ee.Image(ee.Algorithms.If(s2_post_col.size().gt(0), s2_post_col.median(), dummy_s2)).clip(area)
+        s2_pre = s2_pre_col.map(mask_s2_clouds).median().clip(area)
+        s2_post = s2_post_col.map(mask_s2_clouds).median().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -182,12 +183,12 @@ elif page == "2. Spatial Modeling Lab":
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        # BULLETPROOF ADDITION (Ignoring Band Names)
-        slope_safe = slope_mask.unmask(0)
-        sev_safe = severity_mask.unmask(0)
-        soil_safe = soil_risk_mask.unmask(0)
+        # IRONCLAD MATH ADDITION
+        slope_safe = ee.Image(slope_mask).unmask(0).select(0).rename('val').toInt()
+        sev_safe = ee.Image(severity_mask).unmask(0).select(0).rename('val').toInt()
+        soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).rename('val').toInt()
 
-        risk_score = ee.Image.cat([slope_safe, sev_safe, soil_safe]).reduce(ee.Reducer.sum())
+        risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -265,13 +266,14 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
+        # APPLY THE SAME BULLETPROOF FALLBACK HERE
+        dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
         
-        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12'])
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).merge(ee.ImageCollection([dummy_s2]))
         
-        s2_pre = ee.Image(ee.Algorithms.If(s2_pre_col.size().gt(0), s2_pre_col.median(), dummy_s2)).clip(area)
-        s2_post = ee.Image(ee.Algorithms.If(s2_post_col.size().gt(0), s2_post_col.median(), dummy_s2)).clip(area)
+        s2_pre = s2_pre_col.map(mask_s2_clouds).median().clip(area)
+        s2_post = s2_post_col.map(mask_s2_clouds).median().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
