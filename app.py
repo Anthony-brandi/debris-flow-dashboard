@@ -110,7 +110,8 @@ if not cal_fires.empty:
     pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
     pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
     post_fire_start = (ignition_date + timedelta(days=1)).strftime('%Y-%m-%d')
-    post_fire_end = (ignition_date + timedelta(days=30)).strftime('%Y-%m-%d')
+    # Expanded search window to 90 days to ensure imagery is captured
+    post_fire_end = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
     centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
@@ -167,17 +168,20 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
+        # Removed the strict tile-wide cloud filter to prevent empty image collections
+        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds).median().clip(area)
+        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds).median().clip(area)
+        
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        slope_safe = slope_mask.unmask(0).toInt()
-        sev_safe = severity_mask.unmask(0).toInt()
-        soil_safe = soil_risk_mask.unmask(0).toInt()
+        # Select the first band to ensure pure addition compatibility
+        slope_safe = slope_mask.select(0).unmask(0).toInt()
+        sev_safe = severity_mask.select(0).unmask(0).toInt()
+        soil_safe = soil_risk_mask.select(0).unmask(0).toInt()
 
         risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
@@ -257,8 +261,9 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
-        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
+        # Removed the strict tile-wide cloud filter here as well
+        s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds).median().clip(area)
+        s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds).median().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
