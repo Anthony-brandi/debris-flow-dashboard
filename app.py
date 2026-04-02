@@ -167,13 +167,14 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
-        
+        # BULLETPROOF SATELLITE FALLBACK
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
         s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
         
-        s2_pre = s2_pre_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
-        s2_post = s2_post_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
+        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12'])
+        
+        s2_pre = ee.Image(ee.Algorithms.If(s2_pre_col.size().gt(0), s2_pre_col.median(), dummy_s2)).clip(area)
+        s2_post = ee.Image(ee.Algorithms.If(s2_post_col.size().gt(0), s2_post_col.median(), dummy_s2)).clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -181,11 +182,12 @@ elif page == "2. Spatial Modeling Lab":
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        slope_safe = slope_mask.unmask(0).toInt()
-        sev_safe = severity_mask.unmask(0).toInt()
-        soil_safe = soil_risk_mask.unmask(0).toInt()
+        # BULLETPROOF ADDITION (Ignoring Band Names)
+        slope_safe = slope_mask.unmask(0)
+        sev_safe = severity_mask.unmask(0)
+        soil_safe = soil_risk_mask.unmask(0)
 
-        risk_score = slope_safe.add(sev_safe).add(soil_safe)
+        risk_score = ee.Image.cat([slope_safe, sev_safe, soil_safe]).reduce(ee.Reducer.sum())
         hazard_intersection = risk_score.gte(2).selfMask() 
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
@@ -213,7 +215,6 @@ elif page == "2. Spatial Modeling Lab":
         C_STREAMS = '#3498db'
         C_ROADS = '#2ecc71'
 
-        # FIX: Opacity arguments moved out of Earth Engine getMapId() and into Folium TileLayer()
         if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE]})['tile_fetcher'].url_format, attr='USGS', name='Slope', opacity=0.4).add_to(m2)
         if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY]})['tile_fetcher'].url_format, attr='USGS', name='Concavity', opacity=0.6).add_to(m2)
         if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY]})['tile_fetcher'].url_format, attr='ESA', name='Severity', opacity=0.4).add_to(m2)
@@ -264,13 +265,13 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12']).updateMask(0)
-        
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).map(mask_s2_clouds)
         s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).map(mask_s2_clouds)
         
-        s2_pre = s2_pre_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
-        s2_post = s2_post_col.merge(ee.ImageCollection([dummy_s2])).median().clip(area)
+        dummy_s2 = ee.Image.constant([0, 0]).rename(['B8', 'B12'])
+        
+        s2_pre = ee.Image(ee.Algorithms.If(s2_pre_col.size().gt(0), s2_pre_col.median(), dummy_s2)).clip(area)
+        s2_post = ee.Image(ee.Algorithms.If(s2_post_col.size().gt(0), s2_post_col.median(), dummy_s2)).clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -324,7 +325,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         with col1:
             st.markdown("### Watershed Matrix")
             st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Critical Slope Area (Acres)": "{:,.1f}"}), use_container_width=True)
-            st.info("**Sediment Math Engine:**\nVolumes calculated using the USGS Gartner et al. (2014) empirical logistic regression model. Utilizing localized B23 (slope >= 23 degrees) and HM (Moderate/High Severity) areas against the predictive user-defined storm intensity.")
+            st.info("Sediment Math Engine:\nVolumes calculated using the USGS Gartner et al. (2014) empirical logistic regression model. Utilizing localized B23 (slope >= 23 degrees) and HM (Moderate/High Severity) areas against the predictive user-defined storm intensity.")
             
             st.markdown("---")
             clean_fire_name = selected_fire.replace(" ", "_")
@@ -350,7 +351,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             )
 
             st.markdown("---")
-            st.success("**Stream Transport Dynamics:**\nLine thickness represents Average Long-Term Discharge. Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of inundation.")
+            st.success("Stream Transport Dynamics:\nLine thickness represents Average Long-Term Discharge. Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of inundation.")
 
         with col2:
             st.markdown("### Predictive Basin Choropleth")
