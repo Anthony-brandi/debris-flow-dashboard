@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 import zipfile
 import os
+import math
 
 # ==========================================
 # 1. PAGE SETUP & ARCHITECTURE
@@ -19,11 +20,38 @@ page = st.sidebar.radio("Select Module:", [
     "1. Incident Briefing", 
     "2. Spatial Modeling Lab", 
     "3. Watershed Loading (Phase 2 & 3)",
-    "4. Documentation & Methodology" # <--- NEW PAGE ADDED HERE
+    "4. Documentation & Methodology"
 ])
 
 # ==========================================
-# 2. GEE INITIALIZATION
+# 2. ISOLATED DEBRIS FLOW MATH ENGINE
+# ==========================================
+def calculate_gartner_volume(b23_m2, hm_m2, r15_mmhr):
+    """
+    USGS Gartner et al. (2014) Empirical Debris Flow Volume Model
+    Equation: ln(V) = 4.22 + 0.13*ln(B23) + 0.36*ln(R15) + 0.39*sqrt(HM)
+    V = Volume (m3)
+    B23 = Basin area with slope >= 23 degrees (km2)
+    HM = Basin area with High/Moderate burn severity (km2)
+    R15 = Peak 15-min rainfall intensity (mm/hr)
+    """
+    # Convert input square meters to square kilometers
+    b23_km2 = (b23_m2 / 1_000_000) if b23_m2 else 0.0
+    hm_km2 = (hm_m2 / 1_000_000) if hm_m2 else 0.0
+    r15 = float(r15_mmhr)
+
+    # Return 0 if basin is virtually flat or no rain is simulated
+    if b23_km2 <= 0.001 or r15 <= 0:
+        return 0.0
+
+    try:
+        ln_v = 4.22 + (0.13 * math.log(b23_km2)) + (0.36 * math.log(r15)) + (0.39 * math.sqrt(hm_km2))
+        return math.exp(ln_v) # Convert natural log back to cubic meters
+    except ValueError:
+        return 0.0
+
+# ==========================================
+# 3. GEE INITIALIZATION
 # ==========================================
 if 'ee_initialized' not in st.session_state:
     try:
@@ -38,7 +66,7 @@ if 'ee_initialized' not in st.session_state:
         st.error(f"Earth Engine Initialization Error: {e}")
 
 # ==========================================
-# 3. ROBUST CLOUD DATA LOADER
+# 4. ROBUST CLOUD DATA LOADER
 # ==========================================
 @st.cache_data
 def fetch_and_extract_fire_data():
@@ -76,9 +104,6 @@ if not cal_fires.empty:
         fire_series = fire_series.fillna(cal_fires['mission'])
         
     raw_fire_list = sorted(fire_series.dropna().astype(str).unique())
-    
-    # --- UI UPDATE: DYNAMIC DATA CLEANING ---
-    # Filters out fires that are purely numbers, dashes (e.g., '1-1', '2-3'), or less than 3 letters long.
     clean_fire_list = [f for f in raw_fire_list if not f.replace('-', '').replace(' ', '').isnumeric() and len(f) > 3]
     
     selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", clean_fire_list)
@@ -127,20 +152,20 @@ if page == "1. Incident Briefing":
 elif page == "2. Spatial Modeling Lab":
     st.title("Spatial Modeling Lab (Engineering View)")
     
-    SLOPE_LIMIT = 25
+    SLOPE_LIMIT = 23 # Updated to match Gartner 2014 threshold
     DNBR_THRESHOLD = 0.15
     
-    st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}\n\n**Concavity:** Zero-Order Basins")
+    st.sidebar.info(f"**Critical Slope:** >= {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}")
     
     st.sidebar.markdown("### Map Controls")
     basemap_choice = st.sidebar.radio("Reference Basemap:", ["Satellite", "Terrain", "Minimal"])
     
     st.sidebar.markdown("### Layer Visibility")
-    show_risk = st.sidebar.checkbox("Hazard Intersection (Risk)", value=True)
+    show_risk = st.sidebar.checkbox("Composite Hazard Score", value=True)
     show_slope = st.sidebar.checkbox("Topographic Velocity (Slope)", value=False)
-    show_concavity = st.sidebar.checkbox("Topographic Concavity (Hollows)", value=False) 
+    show_concavity = st.sidebar.checkbox("Initiation Points (Hollows)", value=False) 
     show_severity = st.sidebar.checkbox("Burn Severity (dNBR)", value=False)
-    show_soils = st.sidebar.checkbox("Soil Erodibility (K-Factor)", value=False)
+    show_soils = st.sidebar.checkbox("Soil Erodibility", value=False)
     show_streams = st.sidebar.checkbox("HydroSHEDS Stream Routing", value=True)
     show_roads = st.sidebar.checkbox("TIGER Roads", value=True)
 
@@ -157,9 +182,11 @@ elif page == "2. Spatial Modeling Lab":
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
+        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11)
         
-        hazard_intersection = slope_mask.And(concavity_mask).And(severity_mask).And(erodible_soils).selfMask()
+        # CHANGED: Additive Risk Score instead of strict Boolean AND
+        risk_score = slope_mask.add(severity_mask).add(erodible_soils)
+        hazard_intersection = risk_score.gte(2).selfMask() # Requires at least 2 interacting hazard factors
 
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
         streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 1)
@@ -190,15 +217,15 @@ elif page == "2. Spatial Modeling Lab":
         if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE],'opacity':0.4})['tile_fetcher'].url_format, attr='USGS', name='Slope').add_to(m2)
         if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY],'opacity':0.6})['tile_fetcher'].url_format, attr='USGS', name='Concavity').add_to(m2)
         if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY],'opacity':0.4})['tile_fetcher'].url_format, attr='ESA', name='Severity').add_to(m2)
-        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'palette':[C_SOILS],'opacity':0.6})['tile_fetcher'].url_format, attr='Soil', name='Soils').add_to(m2)
+        if show_soils: folium.TileLayer(tiles=erodible_soils.selfMask().getMapId({'palette':[C_SOILS],'opacity':0.6})['tile_fetcher'].url_format, attr='Soil', name='Soils').add_to(m2)
         if show_streams: folium.TileLayer(tiles=streams_img.getMapId({'palette':[C_STREAMS]})['tile_fetcher'].url_format, attr='WWF', name='Streams').add_to(m2)
         if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':[C_ROADS]})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
-        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'palette':[C_RISK],'opacity':1.0})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
+        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'palette':[C_RISK],'opacity':0.8})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
 
         legend_items = []
         if show_risk: legend_items.append(f'<i style="background:{C_RISK}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>')
         if show_slope: legend_items.append(f'<i style="background:{C_SLOPE}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Critical Slope<br>')
-        if show_concavity: legend_items.append(f'<i style="background:{C_CONCAVITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Topographic Concavity<br>')
+        if show_concavity: legend_items.append(f'<i style="background:{C_CONCAVITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Initiation Hollows<br>')
         if show_severity: legend_items.append(f'<i style="background:{C_SEVERITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Severe dNBR<br>')
         if show_soils: legend_items.append(f'<i style="background:{C_SOILS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Erodible Soils<br>')
         if show_streams: legend_items.append(f'<i style="background:{C_STREAMS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Stream Routing<br>')
@@ -221,36 +248,45 @@ elif page == "2. Spatial Modeling Lab":
 # PAGE 3: WATERSHED LOADING (PHASE 2 & 3)
 # ==========================================
 elif page == "3. Watershed Loading (Phase 2 & 3)":
-    st.title("Watershed Loading (Vulnerability Matrix)")
+    st.title("Watershed Loading (Predictive Vulnerability Matrix)")
     
-    with st.spinner("Executing zonal statistics and sediment math across HUC-12 basins via Earth Engine..."):
-        SLOPE_LIMIT = 25
+    # CHANGED: Added Predictive Storm Slider
+    st.sidebar.markdown("### Operational Weather Inputs")
+    design_storm_mmhr = st.sidebar.slider(
+        "Design Storm (Peak 15-min Rainfall Intensity in mm/hr)", 
+        min_value=10.0, max_value=60.0, value=24.0, step=2.0,
+        help="CAL FIRE often evaluates baselines at 24mm/hr. Higher values simulate intense atmospheric rivers."
+    )
+    
+    with st.spinner(f"Executing zonal statistics via Earth Engine & running Gartner 2014 Regression for {design_storm_mmhr} mm/hr..."):
+        SLOPE_LIMIT = 23
         DNBR_THRESHOLD = 0.15
 
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
-        
-        local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
-        concavity_mask = dem.subtract(local_mean).lt(-3)
 
         s2_pre = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
         s2_post = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)).map(mask_s2_clouds).median().clip(area)
-        severity_mask = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12'])).gte(DNBR_THRESHOLD)
-
-        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02").select('b0').clip(area).lt(11).selfMask()
         
-        hazard_intersection = slope_mask.And(concavity_mask).And(severity_mask).And(erodible_soils).selfMask()
-        hazard_area_img = hazard_intersection.multiply(ee.Image.pixelArea())
+        dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
+        severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        precip = ee.ImageCollection("NASA/GPM_L3/IMERG_V06").filterDate(post_fire_start, post_fire_end).select('precipitationCal').max().clip(area)
+        # CHANGED: Prepare images for exact Gartner variables
+        b23_area_img = slope_mask.multiply(ee.Image.pixelArea()).rename('b23_m2')
+        hm_area_img = severity_mask.multiply(ee.Image.pixelArea()).rename('hm_m2')
+        combined_reducer_img = ee.Image.cat([b23_area_img, hm_area_img])
 
         huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
 
         def process_basin(f):
             geom = f.geometry()
-            h_area = hazard_area_img.reduceRegion(reducer=ee.Reducer.sum(), geometry=geom, scale=30, maxPixels=1e9).get('slope')
-            p_mean = precip.reduceRegion(reducer=ee.Reducer.mean(), geometry=geom, scale=100, maxPixels=1e9).get('precipitationCal')
-            return f.set('hazard_area_m2', h_area).set('peak_rain_mm', p_mean)
+            stats = combined_reducer_img.reduceRegion(
+                reducer=ee.Reducer.sum(), 
+                geometry=geom, 
+                scale=30, 
+                maxPixels=1e9
+            )
+            return f.set(stats)
 
         huc12_processed = huc12.map(process_basin)
         huc_data = huc12_processed.getInfo()
@@ -261,21 +297,21 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             name = props.get('name', 'Unknown Basin')
             huc12_id = props.get('huc12', 'Unknown ID')
 
-            raw_area = props.get('hazard_area_m2')
-            raw_rain = props.get('peak_rain_mm')
+            raw_b23 = props.get('b23_m2')
+            raw_hm = props.get('hm_m2')
 
-            h_area_m2 = float(raw_area) if raw_area is not None else 0.0
-            p_rain_mm = float(raw_rain) if raw_rain is not None else 0.0
+            b23_m2 = float(raw_b23) if raw_b23 is not None else 0.0
+            hm_m2 = float(raw_hm) if raw_hm is not None else 0.0
 
-            rain_depth_m = (p_rain_mm * 24) / 1000.0
-            k_factor = 0.35
-            sediment_yield_m3 = h_area_m2 * rain_depth_m * k_factor
+            # Apply the isolated Gartner function
+            sediment_yield_m3 = calculate_gartner_volume(b23_m2, hm_m2, design_storm_mmhr)
 
             basin_results.append({
                 'HUC12_ID': huc12_id,
                 'Basin Name': name,
-                'Hazard Area (Acres)': h_area_m2 * 0.000247105,
-                'Peak Rain (mm/hr)': p_rain_mm,
+                'Critical Slope Area (Acres)': b23_m2 * 0.000247105,
+                'Severe Burn Area (Acres)': hm_m2 * 0.000247105,
+                'Simulated Storm (mm/hr)': design_storm_mmhr,
                 'Sediment Yield (m³)': sediment_yield_m3
             })
 
@@ -285,26 +321,39 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
 
         with col1:
             st.markdown("### Watershed Matrix")
-            st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Hazard Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Hazard Area (Acres)": "{:,.1f}"}), use_container_width=True)
-            st.info("**Sediment Math Engine:**\nCalculated using the spatial intersection area ($m^2$) multiplied by the modeled 24-hour storm depth ($m$) and a K-Factor proxy ($0.35$) for erodible soils. *Note: Area calculation utilizes the Topographic Concavity filter to isolate zero-order basins.*")
+            st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Critical Slope Area (Acres)": "{:,.1f}"}), use_container_width=True)
+            st.info("**Sediment Math Engine:**\nVolumes calculated using the USGS Gartner et al. (2014) empirical logistic regression model. Utilizing localized B23 (slope $\ge$ 23°) and HM (Moderate/High Severity) areas against the predictive user-defined storm intensity.")
             
             st.markdown("---")
-            csv_data = df_results.to_csv(index=False).encode('utf-8')
             clean_fire_name = selected_fire.replace(" ", "_")
+            
+            # Export CSV
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="Download Executive Report (CSV)",
                 data=csv_data,
                 file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
                 mime="text/csv",
-                key=f"export_csv_{selected_fire}", 
+                use_container_width=True
+            )
+
+            # CHANGED: Export GeoJSON for operational GIS
+            gdf_export = gpd.GeoDataFrame.from_features(huc_data['features'])
+            gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+            geojson_data = gdf_export.to_json()
+            st.download_button(
+                label="Download Operational Polygons (GeoJSON)",
+                data=geojson_data,
+                file_name=f"{clean_fire_name}_Debris_Flow_Hazards.geojson",
+                mime="application/geo+json",
                 use_container_width=True
             )
 
             st.markdown("---")
-            st.success("**Stream Transport Dynamics:**\nLine thickness and color represent the **Average Long-Term Discharge** (Flow Accumulation proxy). \n* **Thin / Cyan:** Headwater streams (low discharge).\n* **Thick / Navy:** Major transport arteries (massive discharge). \n\n*Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of debris flow inundation.*")
+            st.success("**Stream Transport Dynamics:**\nLine thickness represents **Average Long-Term Discharge**. Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of inundation.")
 
         with col2:
-            st.markdown("### Basin Choropleth & Stream Transport")
+            st.markdown("### Predictive Basin Choropleth")
             
             gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
             gdf.set_crs(epsg=4326, inplace=True)
@@ -354,8 +403,8 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             ).add_to(m3)
 
             tooltip = folium.GeoJsonTooltip(
-                fields=['name', 'Sediment Yield (m³)', 'Hazard Area (Acres)'],
-                aliases=['Basin:', 'Est. Yield (m³):', 'Hazard Area (Acres):'],
+                fields=['name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)'],
+                aliases=['Basin:', 'Est. Yield (m³):', 'B23 Area (Acres):'],
                 localize=True
             )
             folium.GeoJson(
@@ -367,7 +416,7 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
 
 # ==========================================
-# PAGE 4: DOCUMENTATION & METHODOLOGY (NEW)
+# PAGE 4: DOCUMENTATION & METHODOLOGY
 # ==========================================
 elif page == "4. Documentation & Methodology":
     st.title("System Documentation & Scientific Methodology")
@@ -375,31 +424,25 @@ elif page == "4. Documentation & Methodology":
     
     st.markdown("""
     ### Executive Summary
-    The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events. By leveraging Google Earth Engine (GEE), the system processes high-resolution satellite imagery, topographic data, and meteorological records to identify geomorphic hazard zones and calculate estimated sediment yields at the HUC-12 watershed level.
+    The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events. By leveraging Google Earth Engine (GEE), the system processes high-resolution satellite imagery, topographic data, and user-defined meteorological forecasting to identify geomorphic hazard zones and calculate estimated sediment yields at the HUC-12 watershed level.
     """)
-    
-    # Placeholder for a UI/How-To image
-    # st.image("your_image_path_here.png", caption="System Workflow Overview")
-    st.info("*(Note: To add workflow screenshots or UI images here, place the image files in your GitHub repository and uncomment the `st.image()` lines in the app.py script.)*")
 
     st.markdown("---")
-    st.markdown("### Spatial Modeling Parameters (The Boolean Intersection)")
-    st.markdown("The Spatial Modeling Lab identifies hazard zones by applying a strict Boolean `AND` operation across four primary geospatial layers. A pixel is only flagged as a hazard if it meets all of the following criteria:")
+    st.markdown("### Spatial Modeling Parameters (Probabilistic Risk)")
+    st.markdown("The Spatial Modeling Lab generates a continuous, additive hazard probability score based on the spatial overlap of primary landscape drivers.")
 
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
         **1. Topographic Velocity (Critical Slope)**
         * **Data:** USGS SRTM (Shuttle Radar Topography Mission) DEM, 30m.
-        * **Threshold:** > 25 Degrees
-        * **Justification:** Post-fire debris flows require high gravitational potential energy to overcome soil friction. Slopes exceeding 25 degrees provide the necessary velocity to entrain sediment.
-        * **Source:** *Staley et al. (2017). Logistic regression models for post-fire debris-flow generation.*
+        * **Threshold:** $\ge$ 23 Degrees
+        * **Justification:** Post-fire debris flows require high gravitational potential energy. Slopes exceeding 23 degrees provide the necessary velocity to entrain sediment, aligning with the Gartner (2014) B23 parameter.
         
-        **2. Topographic Concavity (Zero-Order Basins)**
+        **2. Topographic Concavity (Initiation Points)**
         * **Data:** USGS SRTM DEM (50m focal mean kernel).
         * **Threshold:** Local elevation < -3m relative to neighborhood.
-        * **Justification:** Debris flows do not initiate on steep, convex ridges because ridges shed overland flow. Initiation occurs in convergent topography (hollows/ravines) where surface runoff concentrates.
-        * **Source:** *Rengers et al. (2016). The influence of topography on post-fire debris flow initiation.*
+        * **Justification:** While sediment is sourced from planar hillslopes, initiation primarily occurs in convergent topography (hollows/ravines) where surface runoff concentrates.
         """)
         
     with col2:
@@ -407,24 +450,27 @@ elif page == "4. Documentation & Methodology":
         **3. Burn Severity (dNBR)**
         * **Data:** Copernicus Sentinel-2 Multispectral, 10m.
         * **Threshold:** dNBR > 0.15 (Moderate to High Severity).
-        * **Justification:** High-severity fires consume root systems and vaporize organic compounds that condense in the soil profile, creating a hydrophobic layer. This reduces infiltration and amplifies runoff.
-        * **Source:** *Keeley (2009). Fire intensity, fire severity and burn severity: A brief review and suggested usage.*
+        * **Justification:** High-severity fires consume root systems and vaporize organic compounds that condense in the soil profile, creating a hydrophobic layer. This amplifies runoff and aligns with the Gartner HM parameter.
 
-        **4. Soil Erodibility (K-Factor Proxy)**
+        **4. Soil Erodibility**
         * **Data:** OpenLandMap USDA Soil Texture Class.
-        * **Threshold:** Classes < 11 (Loams, Silts, Fine Sands).
-        * **Justification:** Isolates fine-grained, non-cohesive soils that are highly susceptible to detachment and entrainment by overland water flow.
+        * **Threshold:** Classes < 11.
+        * **Justification:** Isolates fine-grained, non-cohesive soils that are highly susceptible to detachment.
         """)
 
     st.markdown("---")
     st.markdown("### Watershed Loading & Sediment Yield")
     st.markdown("""
-    The system transitions from identifying hazard *locations* to quantifying hazard *volumes* by intersecting the Boolean hazard layer with USGS HUC-12 watershed boundaries. 
+    The system quantifies hazard volumes by extracting zonal geometry from the spatial layers and applying the USGS Post-Fire Debris-Flow hazard assessment models within HUC-12 watershed boundaries. 
 
-    **The Sediment Math Engine:**
-    * **Hydraulic Trigger (Precipitation):** Uses NASA GPM (Global Precipitation Measurement) IMERG v06 data to identify the maximum precipitation recorded during the post-fire observation window. 
-    * **Calculation:** The system calculates an Estimated Sediment Yield (Cubic Meters) by multiplying the basin's total hazard area ($m^2$) by the NASA GPM rainfall depth ($m$) and a soil erodibility coefficient ($0.35$).
-    * **Source:** *Gartner et al. (2014). Empirical models to predict the volumes of debris flows generated by recently burned drainage basins.*
+    **The Gartner Math Engine:**
+    * **Model:** USGS Empirical Logistic Regression (Gartner et al., 2014).
+    * **Hydraulic Trigger (Precipitation):** Utilizing a user-defined predictive Design Storm representing the peak 15-minute rainfall intensity (mm/hr).
+    * **Equation:** $\ln(V) = 4.22 + 0.13 \ln(B23) + 0.36 \ln(R15) + 0.39 \sqrt{HM}$
+        * $V$: Total Debris Flow Volume ($m^3$)
+        * $B23$: Basin area with slope $\ge$ 23° ($km^2$)
+        * $R15$: Peak 15-min rainfall intensity ($mm/hr$)
+        * $HM$: Basin area with High/Moderate burn severity ($km^2$)
     """)
     
     st.markdown("---")
