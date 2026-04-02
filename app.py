@@ -167,10 +167,8 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        # BULLETPROOF SATELLITE FALLBACK: Includes B8, B12, AND the QA60 cloud band
         dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
         
-        # Merge the dummy image FIRST so the mask_s2_clouds function never fails
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
         s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).merge(ee.ImageCollection([dummy_s2]))
         
@@ -180,10 +178,10 @@ elif page == "2. Spatial Modeling Lab":
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A_M/v02").select('b0').clip(area)
+        # FIX: The dataset ID is now strictly corrected to 3A1A1A_M
+        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        # IRONCLAD MATH ADDITION
         slope_safe = ee.Image(slope_mask).unmask(0).select(0).rename('val').toInt()
         sev_safe = ee.Image(severity_mask).unmask(0).select(0).rename('val').toInt()
         soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).rename('val').toInt()
@@ -266,7 +264,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        # APPLY THE SAME BULLETPROOF FALLBACK HERE
         dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
         
         s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
