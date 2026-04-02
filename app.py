@@ -18,7 +18,8 @@ st.sidebar.title("PF-WRP Navigation")
 page = st.sidebar.radio("Select Module:", [
     "1. Incident Briefing", 
     "2. Spatial Modeling Lab", 
-    "3. Watershed Loading (Phase 2 & 3)"
+    "3. Watershed Loading (Phase 2 & 3)",
+    "4. Documentation & Methodology" # <--- NEW PAGE ADDED HERE
 ])
 
 # ==========================================
@@ -64,7 +65,7 @@ def fetch_and_extract_fire_data():
         return gpd.GeoDataFrame()
 
 # ==========================================
-# GLOBAL FIRE SELECTION & DATE PARSING
+# GLOBAL FIRE SELECTION & DATA CLEANING
 # ==========================================
 cal_fires = fetch_and_extract_fire_data()
 
@@ -73,8 +74,14 @@ if not cal_fires.empty:
     fire_series = cal_fires[name_col]
     if 'mission' in cal_fires.columns:
         fire_series = fire_series.fillna(cal_fires['mission'])
-    fire_list = sorted(fire_series.dropna().astype(str).unique())
-    selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", fire_list)
+        
+    raw_fire_list = sorted(fire_series.dropna().astype(str).unique())
+    
+    # --- UI UPDATE: DYNAMIC DATA CLEANING ---
+    # Filters out fires that are purely numbers, dashes (e.g., '1-1', '2-3'), or less than 3 letters long.
+    clean_fire_list = [f for f in raw_fire_list if not f.replace('-', '').replace(' ', '').isnumeric() and len(f) > 3]
+    
+    selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", clean_fire_list)
     fire_data = cal_fires[cal_fires[name_col] == selected_fire]
     
     ignition_date = datetime(2021, 1, 1)
@@ -125,7 +132,6 @@ elif page == "2. Spatial Modeling Lab":
     
     st.sidebar.info(f"**Critical Slope:** > {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}\n\n**Concavity:** Zero-Order Basins")
     
-    # --- UI UPDATE: Basemap Toggle ---
     st.sidebar.markdown("### Map Controls")
     basemap_choice = st.sidebar.radio("Reference Basemap:", ["Satellite", "Terrain", "Minimal"])
     
@@ -158,7 +164,6 @@ elif page == "2. Spatial Modeling Lab":
         roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(area), 1, 2)
         streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(area), 1, 1)
 
-        # Apply the Basemap Logic
         if basemap_choice == "Satellite":
             m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
             perimeter_color = 'white'
@@ -169,18 +174,16 @@ elif page == "2. Spatial Modeling Lab":
             m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='CartoDB positron')
             perimeter_color = 'black'
 
-        # --- UI UPDATE: Permanent Boundary ---
         folium.GeoJson(
             fire_data.geometry, 
             style_function=lambda x: {'fillColor': 'transparent', 'color': perimeter_color, 'weight': 2.5, 'dashArray': '5, 5'}
         ).add_to(m2)
 
-        # Layer Hex Colors (Updated for better separation)
-        C_RISK = '#FF5733' # High-vis Safety Orange
+        C_RISK = '#FF5733'
         C_SLOPE = 'yellow'
-        C_CONCAVITY = '#8e44ad' # Purple
+        C_CONCAVITY = '#8e44ad'
         C_SEVERITY = 'red'
-        C_SOILS = '#8B4513' # Saddle Brown (To separate from red severity)
+        C_SOILS = '#8B4513'
         C_STREAMS = '#3498db'
         C_ROADS = '#2ecc71'
 
@@ -192,7 +195,6 @@ elif page == "2. Spatial Modeling Lab":
         if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':[C_ROADS]})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
         if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'palette':[C_RISK],'opacity':1.0})['tile_fetcher'].url_format, attr='GEE', name='Risk').add_to(m2)
 
-        # --- UI UPDATE: Dynamic Legend ---
         legend_items = []
         if show_risk: legend_items.append(f'<i style="background:{C_RISK}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>')
         if show_slope: legend_items.append(f'<i style="background:{C_SLOPE}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Critical Slope<br>')
@@ -202,7 +204,6 @@ elif page == "2. Spatial Modeling Lab":
         if show_streams: legend_items.append(f'<i style="background:{C_STREAMS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Stream Routing<br>')
         if show_roads: legend_items.append(f'<i style="background:{C_ROADS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Infrastructure<br>')
         
-        # Always display the perimeter legend item
         legend_items.append(f'<i style="background:transparent; border: 2px dashed {perimeter_color}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Fire Perimeter<br>')
 
         legend_html = f"""
@@ -213,7 +214,6 @@ elif page == "2. Spatial Modeling Lab":
         
         m2.get_root().html.add_child(folium.Element(legend_html))
 
-        # Add basemap_choice to the key so Streamlit redraws when map type changes
         toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_concavity}{show_severity}{show_soils}{show_streams}{show_roads}_{basemap_choice}"
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
@@ -312,7 +312,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
 
             m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
 
-            # Added permanent fire boundary to Page 3 as well for consistency
             folium.GeoJson(
                 fire_data.geometry, 
                 style_function=lambda x: {'fillColor': 'transparent', 'color': 'black', 'weight': 2, 'dashArray': '5, 5'}
@@ -366,3 +365,71 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             ).add_to(m3)
 
             st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
+
+# ==========================================
+# PAGE 4: DOCUMENTATION & METHODOLOGY (NEW)
+# ==========================================
+elif page == "4. Documentation & Methodology":
+    st.title("System Documentation & Scientific Methodology")
+    st.markdown("---")
+    
+    st.markdown("""
+    ### Executive Summary
+    The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events. By leveraging Google Earth Engine (GEE), the system processes high-resolution satellite imagery, topographic data, and meteorological records to identify geomorphic hazard zones and calculate estimated sediment yields at the HUC-12 watershed level.
+    """)
+    
+    # Placeholder for a UI/How-To image
+    # st.image("your_image_path_here.png", caption="System Workflow Overview")
+    st.info("*(Note: To add workflow screenshots or UI images here, place the image files in your GitHub repository and uncomment the `st.image()` lines in the app.py script.)*")
+
+    st.markdown("---")
+    st.markdown("### Spatial Modeling Parameters (The Boolean Intersection)")
+    st.markdown("The Spatial Modeling Lab identifies hazard zones by applying a strict Boolean `AND` operation across four primary geospatial layers. A pixel is only flagged as a hazard if it meets all of the following criteria:")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        **1. Topographic Velocity (Critical Slope)**
+        * **Data:** USGS SRTM (Shuttle Radar Topography Mission) DEM, 30m.
+        * **Threshold:** > 25 Degrees
+        * **Justification:** Post-fire debris flows require high gravitational potential energy to overcome soil friction. Slopes exceeding 25 degrees provide the necessary velocity to entrain sediment.
+        * **Source:** *Staley et al. (2017). Logistic regression models for post-fire debris-flow generation.*
+        
+        **2. Topographic Concavity (Zero-Order Basins)**
+        * **Data:** USGS SRTM DEM (50m focal mean kernel).
+        * **Threshold:** Local elevation < -3m relative to neighborhood.
+        * **Justification:** Debris flows do not initiate on steep, convex ridges because ridges shed overland flow. Initiation occurs in convergent topography (hollows/ravines) where surface runoff concentrates.
+        * **Source:** *Rengers et al. (2016). The influence of topography on post-fire debris flow initiation.*
+        """)
+        
+    with col2:
+        st.markdown("""
+        **3. Burn Severity (dNBR)**
+        * **Data:** Copernicus Sentinel-2 Multispectral, 10m.
+        * **Threshold:** dNBR > 0.15 (Moderate to High Severity).
+        * **Justification:** High-severity fires consume root systems and vaporize organic compounds that condense in the soil profile, creating a hydrophobic layer. This reduces infiltration and amplifies runoff.
+        * **Source:** *Keeley (2009). Fire intensity, fire severity and burn severity: A brief review and suggested usage.*
+
+        **4. Soil Erodibility (K-Factor Proxy)**
+        * **Data:** OpenLandMap USDA Soil Texture Class.
+        * **Threshold:** Classes < 11 (Loams, Silts, Fine Sands).
+        * **Justification:** Isolates fine-grained, non-cohesive soils that are highly susceptible to detachment and entrainment by overland water flow.
+        """)
+
+    st.markdown("---")
+    st.markdown("### Watershed Loading & Sediment Yield")
+    st.markdown("""
+    The system transitions from identifying hazard *locations* to quantifying hazard *volumes* by intersecting the Boolean hazard layer with USGS HUC-12 watershed boundaries. 
+
+    **The Sediment Math Engine:**
+    * **Hydraulic Trigger (Precipitation):** Uses NASA GPM (Global Precipitation Measurement) IMERG v06 data to identify the maximum precipitation recorded during the post-fire observation window. 
+    * **Calculation:** The system calculates an Estimated Sediment Yield (Cubic Meters) by multiplying the basin's total hazard area ($m^2$) by the NASA GPM rainfall depth ($m$) and a soil erodibility coefficient ($0.35$).
+    * **Source:** *Gartner et al. (2014). Empirical models to predict the volumes of debris flows generated by recently burned drainage basins.*
+    """)
+    
+    st.markdown("---")
+    st.markdown("### Stream Transport Capacity")
+    st.markdown("""
+    **Data:** WWF HydroSHEDS Free Flowing Rivers.
+    Upstream basins provide the sediment supply, but the arterial rivers dictate the transport path. Channels are styled using `DIS_AV_CMS` (Average Long-Term Naturalized Discharge). High-discharge channels situated below high-yield basins represent the zones of highest inundation risk for downstream infrastructure.
+    """)
