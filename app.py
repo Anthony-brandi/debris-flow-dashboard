@@ -56,7 +56,7 @@ if 'ee_initialized' not in st.session_state:
         st.error(f"Earth Engine Initialization Error: {e}")
 
 # ==========================================
-# 4. ROBUST CLOUD DATA LOADER (DYNAMIC COLUMNS)
+# 4. ROBUST CLOUD DATA LOADER
 # ==========================================
 @st.cache_data
 def fetch_and_extract_fire_data():
@@ -77,7 +77,6 @@ def fetch_and_extract_fire_data():
                 geojson_path = os.path.join(extract_dir, file)
                 fires = gpd.read_file(geojson_path)
                 
-                # DYNAMIC COLUMN DISCOVERY
                 possible_names = ['incident_n', 'FIRE_NAME', 'Fire_Name', 'Name', 'name', 'mission']
                 actual_name_col = next((col for col in possible_names if col in fires.columns), fires.columns[0])
                 
@@ -178,13 +177,16 @@ elif page == "2. Spatial Modeling Lab":
         local_mean = dem.focal_mean(radius=50, units='meters').clip(area)
         concavity_mask = dem.subtract(local_mean).lt(-3) 
 
-        dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
+        # BULLETPROOF MOSAIC FALLBACK: Guarantees bands B8 and B12 always exist
+        fallback_s2 = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
         
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).merge(ee.ImageCollection([dummy_s2]))
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end)
+        s2_pre_med = s2_pre_col.map(mask_s2_clouds).median()
+        s2_pre = ee.ImageCollection([fallback_s2, s2_pre_med]).mosaic().clip(area)
         
-        s2_pre = s2_pre_col.map(mask_s2_clouds).median().clip(area)
-        s2_post = s2_post_col.map(mask_s2_clouds).median().clip(area)
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end)
+        s2_post_med = s2_post_col.map(mask_s2_clouds).median()
+        s2_post = ee.ImageCollection([fallback_s2, s2_post_med]).mosaic().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
@@ -192,9 +194,10 @@ elif page == "2. Spatial Modeling Lab":
         erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02").select('b0').clip(area)
         soil_risk_mask = erodible_soils.gte(40) 
         
-        slope_safe = ee.Image(slope_mask).unmask(0).select(0).rename('val').toInt()
-        sev_safe = ee.Image(severity_mask).unmask(0).select(0).rename('val').toInt()
-        soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).rename('val').toInt()
+        # Safe addition by explicitly selecting the first band
+        slope_safe = ee.Image(slope_mask).unmask(0).select(0).toInt()
+        sev_safe = ee.Image(severity_mask).unmask(0).select(0).toInt()
+        soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).toInt()
 
         risk_score = slope_safe.add(sev_safe).add(soil_safe)
         hazard_intersection = risk_score.gte(2).selfMask() 
@@ -274,27 +277,27 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         dem = ee.Image("USGS/SRTMGL1_003")
         slope_mask = ee.Terrain.slope(dem).clip(area).gte(SLOPE_LIMIT)
 
-        dummy_s2 = ee.Image.constant([0.0001, 0.0001, 0]).rename(['B8', 'B12', 'QA60'])
+        # BULLETPROOF MOSAIC FALLBACK: Used here for Page 3 as well
+        fallback_s2 = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
         
-        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end).merge(ee.ImageCollection([dummy_s2]))
-        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end).merge(ee.ImageCollection([dummy_s2]))
+        s2_pre_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(pre_fire_start, pre_fire_end)
+        s2_pre_med = s2_pre_col.map(mask_s2_clouds).median()
+        s2_pre = ee.ImageCollection([fallback_s2, s2_pre_med]).mosaic().clip(area)
         
-        s2_pre = s2_pre_col.map(mask_s2_clouds).median().clip(area)
-        s2_post = s2_post_col.map(mask_s2_clouds).median().clip(area)
+        s2_post_col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(area).filterDate(post_fire_start, post_fire_end)
+        s2_post_med = s2_post_col.map(mask_s2_clouds).median()
+        s2_post = ee.ImageCollection([fallback_s2, s2_post_med]).mosaic().clip(area)
         
         dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
         severity_mask = dnbr.gte(DNBR_THRESHOLD)
 
-        b23_area_img = slope_mask.unmask(0).multiply(ee.Image.pixelArea()).rename('b23_m2')
-        hm_area_img = severity_mask.unmask(0).multiply(ee.Image.pixelArea()).rename('hm_m2')
+        b23_area_img = ee.Image(slope_mask).unmask(0).select(0).multiply(ee.Image.pixelArea()).rename('b23_m2')
+        hm_area_img = ee.Image(severity_mask).unmask(0).select(0).multiply(ee.Image.pixelArea()).rename('hm_m2')
         combined_reducer_img = ee.Image.cat([b23_area_img, hm_area_img])
 
         huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(area)
 
-        # MEGA-FIRE OPTIMIZATION V2: 
-        # 1. Scale from 30m to 90m (cuts processing time by 900%)
-        # 2. TileScale 16 (max distributed processing)
-        # 3. Simplify geometries heavily (150m error tolerance) to fit under Streamlit's 10MB payload limit
+        # MEGA-FIRE OPTIMIZATION: Max scale, max tileScale, extreme geometry compression
         huc12_processed = combined_reducer_img.reduceRegions(
             collection=huc12,
             reducer=ee.Reducer.sum(),
