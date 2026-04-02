@@ -421,16 +421,19 @@ elif page == "4. Documentation & Methodology":
 
         st.markdown("""
         #### Step 1: Select the Incident
-        Navigate to the **Incident Briefing** or **Spatial Modeling Lab** using the sidebar to select a specific fire perimeter from the master dataset. Ensure the fire perimeter and ignition dates align with current incident records.
+        Navigate to the **Incident Briefing** module using the sidebar to select a specific fire perimeter from the master dataset. Ensure the fire perimeter and ignition dates align with current incident records.
 
-        #### Step 2: Simulate Predictive Rainfall
+        #### Step 2: Interrogate Spatial Drivers
+        Navigate to the **Spatial Modeling Lab**. Use the map controls and layer visibility toggles to isolate specific geomorphic risk factors (e.g., Burn Severity, Critical Slope, Initiation Hollows). This step visualizes the composite hazard score and identifies spatial initiation zones prior to calculating downstream watershed impacts.
+
+        #### Step 3: Simulate Predictive Rainfall
         Navigate to **Phase 3: Watershed Loading**. Utilize the Operational Weather Inputs sidebar to input the anticipated **Peak 15-minute Rainfall Intensity (mm/hr)** for upcoming storm systems. 
         """)
         
         st.warning("Note: CAL FIRE baseline evaluations typically begin at 24mm/hr. Higher values should be used to simulate intense atmospheric river events.")
 
         st.markdown("""
-        #### Step 3: Export Operational Data
+        #### Step 4: Export Operational Data
         Once the Earth Engine completes the HUC-12 basin calculations, utilize the export buttons to download:
         * **Executive Report (CSV):** For quantitative review and rapid triage by the WERT team.
         * **Operational Polygons (GeoJSON):** For direct integration into local offline GIS systems or evacuation routing software.
@@ -446,7 +449,7 @@ elif page == "4. Documentation & Methodology":
             **1. Topographic Velocity (Critical Slope)**
             * **The Threshold:** Slopes greater than or equal to 23 Degrees.
             * **Why it matters:** Debris flows require steep terrain to gain momentum. If a hillside is too flat, water just creates puddles or slow-moving mud. At 23 degrees, gravity becomes stronger than the friction holding the soil to the mountain, allowing massive walls of mud to rapidly accelerate downhill.
-            * **Scientific Source:** [Staley, D. M., et al. (2017)](https://doi.org/10.1007/s10346-016-0761-9).
+            * **Scientific Source:** [Staley, D. M., et al. (2017)](https://agupubs.onlinelibrary.wiley.com/doi/pdf/10.1002/2017GL074243).
             
             **2. Topographic Concavity (Initiation Points)**
             * **The Threshold:** Local elevation less than -3m relative to the surrounding area.
@@ -459,7 +462,7 @@ elif page == "4. Documentation & Methodology":
             **3. Burn Severity (dNBR)**
             * **The Threshold:** dNBR > 0.15 (Moderate to High Severity).
             * **Why it matters:** When a fire burns incredibly hot, it doesn't just destroy the tree roots holding the dirt together. It actually vaporizes organic matter in the soil, which cools and forms a waxy, water-repellent (hydrophobic) crust on the ground. When rain hits this baked crust, it cannot soak in. Almost 100 percent of the water rushes downhill instantly.
-            * **Scientific Source:** [Key, C. H., & Benson, N. C. (2006)](https://doi.org/10.2737/RMRS-GTR-164).
+            * **Scientific Source:** [Key, C. H., & Benson, N. C. (2006)](https://research.fs.usda.gov/treesearch/24042).
 
             **4. Soil Erodibility**
             * **The Threshold:** Measured by the percentage of sand in the soil profile.
