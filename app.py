@@ -301,8 +301,16 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
 
         huc_data = huc12_processed.getInfo()
 
+        # ULTIMATE MAP CRASH FIX: Strip Null Geometries at the Root JSON level
+        clean_features = []
+        for f in huc_data.get('features', []):
+            geom = f.get('geometry')
+            # Check if geometry exists AND if its coordinate array actually holds data
+            if geom is not None and geom.get('coordinates'):
+                clean_features.append(f)
+
         basin_results = []
-        for feature in huc_data['features']:
+        for feature in clean_features:
             props = feature['properties']
             name = props.get('name', 'Unknown Basin')
             huc12_id = props.get('huc12', 'Unknown ID')
@@ -336,13 +344,14 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st.markdown("---")
             clean_fire_name = selected_fire.replace(" ", "_")
             
-            # --- MAP CRASH FIX: Clean the collapsed geometries before export ---
-            gdf_export = gpd.GeoDataFrame.from_features(huc_data['features'])
-            gdf_export = gdf_export.dropna(subset=['geometry'])
-            gdf_export = gdf_export[gdf_export.geometry.is_valid & ~gdf_export.geometry.is_empty]
-            
-            gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
-            geojson_data = gdf_export.to_json()
+            gdf_export = gpd.GeoDataFrame.from_features(clean_features)
+            if not gdf_export.empty:
+                gdf_export = gdf_export[gdf_export.geometry.notna()]
+                gdf_export = gdf_export[gdf_export.geometry.is_valid & ~gdf_export.geometry.is_empty]
+                gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+                geojson_data = gdf_export.to_json()
+            else:
+                geojson_data = "{}"
             
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(
@@ -367,69 +376,70 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         with col2:
             st.markdown("### Predictive Basin Choropleth")
             
-            # --- MAP CRASH FIX: Drop null/empty geometries before passing to Folium ---
-            gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
-            gdf = gdf.dropna(subset=['geometry'])
-            gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
-            
-            gdf.set_crs(epsg=4326, inplace=True)
-            gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+            gdf = gpd.GeoDataFrame.from_features(clean_features)
+            if not gdf.empty:
+                gdf = gdf[gdf.geometry.notna()]
+                gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
+                gdf.set_crs(epsg=4326, inplace=True)
+                gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
-            m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
+                m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
 
-            folium.GeoJson(
-                fire_data.geometry, 
-                style_function=lambda x: {'fillColor': 'transparent', 'color': 'black', 'weight': 2, 'dashArray': '5, 5'}
-            ).add_to(m3)
+                folium.GeoJson(
+                    fire_data.geometry, 
+                    style_function=lambda x: {'fillColor': 'transparent', 'color': 'black', 'weight': 2, 'dashArray': '5, 5'}
+                ).add_to(m3)
 
-            folium.Choropleth(
-                geo_data=gdf,
-                name='Sediment Yield',
-                data=df_results,
-                columns=['HUC12_ID', 'Sediment Yield (m³)', 'Basin Name'],
-                key_on='feature.properties.huc12',
-                fill_color='YlOrRd',
-                fill_opacity=0.7,
-                line_opacity=0.3,
-                legend_name='Estimated Sediment Yield (Cubic Meters)'
-            ).add_to(m3)
+                folium.Choropleth(
+                    geo_data=gdf,
+                    name='Sediment Yield',
+                    data=df_results,
+                    columns=['HUC12_ID', 'Sediment Yield (m³)', 'Basin Name'],
+                    key_on='feature.properties.huc12',
+                    fill_color='YlOrRd',
+                    fill_opacity=0.7,
+                    line_opacity=0.3,
+                    legend_name='Estimated Sediment Yield (Cubic Meters)'
+                ).add_to(m3)
 
-            streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area)
-            
-            def style_streams(f):
-                discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
-                log_dis = discharge.log10()
-                line_width = log_dis.multiply(1.5).add(0.5)
-                return f.set('acc_width', line_width).set('acc_color', log_dis)
+                streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area)
+                
+                def style_streams(f):
+                    discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
+                    log_dis = discharge.log10()
+                    line_width = log_dis.multiply(1.5).add(0.5)
+                    return f.set('acc_width', line_width).set('acc_color', log_dis)
 
-            styled_streams = streams.map(style_streams)
-            stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
-            
-            stream_vis = stream_img.getMapId({
-                'min': 0, 
-                'max': 2.5, 
-                'palette': ['#00b4d8', '#0077b6', '#03045e'] 
-            })
-            
-            folium.TileLayer(
-                tiles=stream_vis['tile_fetcher'].url_format, 
-                attr='WWF', 
-                name='Stream Transport (Discharge)', 
-                overlay=True
-            ).add_to(m3)
+                styled_streams = streams.map(style_streams)
+                stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
+                
+                stream_vis = stream_img.getMapId({
+                    'min': 0, 
+                    'max': 2.5, 
+                    'palette': ['#00b4d8', '#0077b6', '#03045e'] 
+                })
+                
+                folium.TileLayer(
+                    tiles=stream_vis['tile_fetcher'].url_format, 
+                    attr='WWF', 
+                    name='Stream Transport (Discharge)', 
+                    overlay=True
+                ).add_to(m3)
 
-            tooltip = folium.GeoJsonTooltip(
-                fields=['name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)'],
-                aliases=['Basin:', 'Est. Yield (m³):', 'B23 Area (Acres):'],
-                localize=True
-            )
-            folium.GeoJson(
-                gdf,
-                style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent'},
-                tooltip=tooltip
-            ).add_to(m3)
+                tooltip = folium.GeoJsonTooltip(
+                    fields=['name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)'],
+                    aliases=['Basin:', 'Est. Yield (m³):', 'B23 Area (Acres):'],
+                    localize=True
+                )
+                folium.GeoJson(
+                    gdf,
+                    style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent'},
+                    tooltip=tooltip
+                ).add_to(m3)
 
-            st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
+                st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
+            else:
+                st.warning("No valid basin geometries found to draw on the map.")
 
 # ==========================================
 # PAGE 4: DOCUMENTATION & METHODOLOGY
