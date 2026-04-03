@@ -124,7 +124,7 @@ if not cal_fires.empty:
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
     
-    # NUCLEAR OPTIMIZATION 1: Simplify fire perimeter to prevent ray-casting timeouts
+    # NUCLEAR OPTIMIZATION 1: Simplify fire perimeter
     simplified_area = area.geometry().simplify(maxError=100)
     centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
 else:
@@ -136,12 +136,10 @@ def mask_s2_clouds(image):
     mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
     return image.updateMask(mask).divide(10000)
 
-# NUCLEAR OPTIMIZATION 2: Safe Satellite Routing
 def get_safe_s2(start, end, geom):
     col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(geom).filterDate(start, end)
     dummy = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
     
-    # If the collection has images, map the cloud mask. Otherwise, return the safe dummy.
     def process_s2():
         return col.map(mask_s2_clouds).select(['B8', 'B12']).median()
         
@@ -294,7 +292,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
 
         huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(simplified_area)
 
-        # NUCLEAR OPTIMIZATION 3: Scale 250m reduces math by 64x. maxError=100 ensures Streamlit payload is tiny.
         huc12_processed = combined_reducer_img.reduceRegions(
             collection=huc12,
             reducer=ee.Reducer.sum(),
@@ -339,6 +336,14 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
             st.markdown("---")
             clean_fire_name = selected_fire.replace(" ", "_")
             
+            # --- MAP CRASH FIX: Clean the collapsed geometries before export ---
+            gdf_export = gpd.GeoDataFrame.from_features(huc_data['features'])
+            gdf_export = gdf_export.dropna(subset=['geometry'])
+            gdf_export = gdf_export[gdf_export.geometry.is_valid & ~gdf_export.geometry.is_empty]
+            
+            gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+            geojson_data = gdf_export.to_json()
+            
             csv_data = df_results.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="Download Executive Report (CSV)",
@@ -348,9 +353,6 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
                 use_container_width=True
             )
 
-            gdf_export = gpd.GeoDataFrame.from_features(huc_data['features'])
-            gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
-            geojson_data = gdf_export.to_json()
             st.download_button(
                 label="Download Operational Polygons (GeoJSON)",
                 data=geojson_data,
@@ -365,7 +367,11 @@ elif page == "3. Watershed Loading (Phase 2 & 3)":
         with col2:
             st.markdown("### Predictive Basin Choropleth")
             
+            # --- MAP CRASH FIX: Drop null/empty geometries before passing to Folium ---
             gdf = gpd.GeoDataFrame.from_features(huc_data['features'])
+            gdf = gdf.dropna(subset=['geometry'])
+            gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
+            
             gdf.set_crs(epsg=4326, inplace=True)
             gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
 
