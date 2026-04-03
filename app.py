@@ -19,7 +19,7 @@ st.sidebar.title("PF-WRP Navigation")
 page = st.sidebar.radio("Select Module:", [
     "1. Incident Briefing", 
     "2. Spatial Modeling Lab", 
-    "3. Watershed Loading (Phase 2 & 3)",
+    "3. Predictive Debris Flow Modeling",  # <--- Change this line
     "4. Documentation & Methodology"
 ])
 
@@ -261,10 +261,10 @@ elif page == "2. Spatial Modeling Lab":
         st_folium(m2, use_container_width=True, height=700, key=toggle_key)
 
 # ==========================================
-# PAGE 3: WATERSHED LOADING (PHASE 2 & 3)
+# PAGE 3: PREDICTIVE DEBRIS FLOW MODELING
 # ==========================================
-elif page == "3. Watershed Loading (Phase 2 & 3)":
-    st.title("Watershed Loading (Predictive Vulnerability Matrix)")
+elif page == "3. Predictive Debris Flow Modeling": # <--- This must perfectly match Location 1
+    st.title("Predictive Debris Flow Modeling") # <--- You can also update the big page title here
     
     st.sidebar.markdown("### Operational Weather Inputs")
     design_storm_mmhr = st.sidebar.slider(
