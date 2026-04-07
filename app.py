@@ -1,491 +1,531 @@
-"""
-PF-WRP Validation Pipeline
-===========================
-Standalone script to validate the Post-Fire Watershed Risk Portal's
-calculate_gartner_volume() engine against published USGS field data.
-
-HOW TO USE:
-1. Download the USGS dataset CSV from: https://doi.org/10.5066/P13EZSWW
-   -> File: DebrisFlowVolume_Inventory.csv
-2. Place it in the same folder as this script.
-3. Run: python pfwrp_validation_pipeline.py
-4. Outputs: validation_results.csv + validation_plots.png
-
-DEPENDENCIES: pip install pandas numpy matplotlib scipy
-"""
-
-import math
+import streamlit as st
+import geopandas as gpd
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from scipy import stats
+import folium
+from streamlit_folium import st_folium
+import ee
+import json
+from datetime import datetime, timedelta
+import zipfile
 import os
-import sys
+import math
 
-# ============================================================
-# STEP 1: REPLICATED GARTNER ENGINE (from your app.py)
-# ============================================================
+# ==========================================
+# 1. PAGE SETUP & ARCHITECTURE
+# ==========================================
+st.set_page_config(page_title="PF-WRP | Post-Fire Watershed Risk Portal", layout="wide")
+
+st.sidebar.title("PF-WRP Navigation")
+page = st.sidebar.radio("Select Module:", [
+    "1. Incident Briefing", 
+    "2. Spatial Modeling Lab", 
+    "3. Predictive Debris Flow Modeling",  # <--- Change this line
+    "4. Documentation & Methodology"
+])
+
+# ==========================================
+# 2. ISOLATED DEBRIS FLOW MATH ENGINE
+# ==========================================
 def calculate_gartner_volume(b23_m2, hm_m2, r15_mmhr):
-    """
-    Exact replica of the calculate_gartner_volume() function in app.py.
-    Gartner et al. (2014): ln(V) = 4.22 + 0.13*ln(B23) + 0.36*ln(R15) + 0.39*sqrt(HM)
-    
-    Inputs:
-        b23_m2   : Basin area with slope >= 23 degrees (square meters)
-        hm_m2    : Basin area with moderate/high burn severity (square meters)
-        r15_mmhr : Peak 15-minute rainfall intensity (mm/hr)
-    Returns:
-        Predicted debris flow volume (cubic meters)
-    """
     b23_km2 = (b23_m2 / 1_000_000) if b23_m2 else 0.0
-    hm_km2  = (hm_m2  / 1_000_000) if hm_m2  else 0.0
-    r15     = float(r15_mmhr)
+    hm_km2 = (hm_m2 / 1_000_000) if hm_m2 else 0.0
+    r15 = float(r15_mmhr)
 
     if b23_km2 <= 0.001 or r15 <= 0:
         return 0.0
 
     try:
-        ln_v = (4.22 
-                + (0.13 * math.log(b23_km2)) 
-                + (0.36 * math.log(r15)) 
-                + (0.39 * math.sqrt(hm_km2)))
-        return math.exp(ln_v)
+        ln_v = 4.22 + (0.13 * math.log(b23_km2)) + (0.36 * math.log(r15)) + (0.39 * math.sqrt(hm_km2))
+        return math.exp(ln_v) 
     except ValueError:
         return 0.0
 
+# ==========================================
+# 3. GEE INITIALIZATION
+# ==========================================
+if 'ee_initialized' not in st.session_state:
+    try:
+        if "EARTHENGINE_JSON" in st.secrets:
+            creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
+            credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
+            ee.Initialize(credentials, project='gee-streamlit-app-490500')
+        else:
+            ee.Initialize(project='gee-streamlit-app-490500')
+        st.session_state['ee_initialized'] = True
+    except Exception as e:
+        st.error(f"Earth Engine Initialization Error: {e}")
 
-# ============================================================
-# STEP 2: LOAD & PARSE USGS INVENTORY CSV
-# ============================================================
-def load_usgs_inventory(csv_path="DebrisFlowVolume_Inventory.csv"):
-    """
-    Loads the USGS post-fire debris flow volume inventory.
-    Download from: https://doi.org/10.5066/P13EZSWW
+# ==========================================
+# 4. ROBUST CLOUD DATA LOADER
+# ==========================================
+@st.cache_data
+def fetch_and_extract_fire_data():
+    zip_path = 'Master_Fire_Dataset.geojson.zip'
+    extract_dir = 'temp_fire_data_v4'
     
-    Key columns used (from the dataset's README.txt):
-        FireName    : Name of the fire
-        Volume_m3   : Measured debris flow volume (m³) — the ground truth
-        I15_mmhr    : Peak 15-min rainfall intensity recorded (mm/hr)
-        B23_km2     : Basin area with slope >= 23 degrees (km²)
-        HM_km2      : Basin area with moderate/high burn severity (km²)
-        WshedID     : Unique watershed identifier
-        State       : State abbreviation
-    
-    NOTE: Column names may differ slightly. The script will attempt to 
-    auto-detect them. Check README.txt in the dataset for exact field names.
-    """
-    if not os.path.exists(csv_path):
-        print(f"\n{'='*60}")
-        print("ERROR: USGS dataset not found.")
-        print(f"Expected file: {csv_path}")
-        print("\nTo download:")
-        print("1. Go to: https://doi.org/10.5066/P13EZSWW")
-        print("2. Click the ScienceBase link")
-        print("3. Download 'DebrisFlowVolume_Inventory.csv'")
-        print("4. Place it in the same folder as this script")
-        print(f"{'='*60}\n")
+    try:
+        if not os.path.exists(extract_dir):
+            os.makedirs(extract_dir)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for member in zip_ref.namelist():
+                    if not member.startswith('__MACOSX') and member.endswith('.geojson'):
+                        zip_ref.extract(member, extract_dir)
         
-        # Generate DEMO data for testing the pipeline structure
-        print("Generating DEMO data using published Thomas Fire values...")
-        return generate_demo_data()
-
-    df = pd.read_csv(csv_path)
-    print(f"Loaded {len(df)} records from USGS inventory.")
-    print(f"Fires covered: {df['FireName'].nunique() if 'FireName' in df.columns else '?'}")
-    print(f"Columns: {list(df.columns)}\n")
-    return df
-
-
-def generate_demo_data():
-    """
-    Hard-coded validation data from published literature for Thomas Fire basins.
-    Sources:
-      - Kean et al. (2019): Measured volumes for Montecito-area basins
-      - Lancaster et al. (2021): Field documentation of Jan 9, 2018 event
-      - Your app.py hindcast outputs (predicted values)
-    
-    IMPORTANT: These are approximate published values for demonstration.
-    Replace with the actual USGS CSV for rigorous validation.
-    
-    R15 note: Actual recorded peak I15 on Jan 9 2018 was 78-105 mm/hr
-    (Kean et al. 2019). Your app uses 24 mm/hr as the CAL FIRE baseline.
-    Both are included to demonstrate sensitivity.
-    """
-    data = {
-        # Thomas Fire basins with published Kean et al. 2019 measured volumes
-        # Measured volumes represent total deposition at fan/outlet
-        'FireName':     ['Thomas'] * 8,
-        'BasinName':    [
-            'Matilija Creek',
-            'Santa Paula Creek', 
-            'San Antonio Creek',
-            'Coyote Creek',
-            'Adams Canyon-Santa Clara River',
-            'Lower Ventura River',
-            'Juncal Canyon-Santa Ynez River',
-            'Tule Creek-Sespe Creek'
-        ],
-        # Your app.py hindcast predicted volumes at 24 mm/hr
-        'PFW_Predicted_24mmhr': [26511, 12591, 9841, 8389, 7896, 6219, 6201, 4204],
-        
-        # Critical slope area (km²) — from your app.py Thomas Fire output
-        # B23 converted from Acres: divide by 247.105
-        'B23_km2': [
-            6322.9 / 247.105,   # Matilija
-            3784.6 / 247.105,   # Santa Paula
-            1980.0 / 247.105,   # San Antonio
-            1071.1 / 247.105,   # Coyote
-             470.3 / 247.105,   # Adams Canyon
-             225.0 / 247.105,   # Lower Ventura
-             724.7 / 247.105,   # Juncal Canyon
-             777.6 / 247.105,   # Tule Creek
-        ],
-        
-        # Burn severity (HM) area — estimated from typical Thomas Fire dNBR coverage
-        # ~65% of each basin area at moderate/high severity (chaparral dominated)
-        'HM_km2': [
-            6322.9 / 247.105 * 0.65,
-            3784.6 / 247.105 * 0.65,
-            1980.0 / 247.105 * 0.65,
-            1071.1 / 247.105 * 0.65,
-             470.3 / 247.105 * 0.65,
-             225.0 / 247.105 * 0.65,
-             724.7 / 247.105 * 0.65,
-             777.6 / 247.105 * 0.65,
-        ],
-        
-        # Recorded peak I15 on Jan 9, 2018 (Kean et al. 2019)
-        'I15_recorded_mmhr': [91, 91, 85, 85, 78, 78, 85, 78],
-        
-        # Published/measured debris flow volumes (Kean et al. 2019, Lancaster et al. 2021)
-        # Total measured across six Montecito basins = ~679,000 m³
-        # Individual basin estimates reconstructed from paper figures and tables
-        'Measured_Volume_m3': [
-            None,       # Matilija: no direct fan measurement; flagged as highest risk
-            95000,      # Santa Paula: Kean et al. 2019 fan deposit estimate
-            52000,      # San Antonio: Kean et al. 2019
-            38000,      # Coyote: Kean et al. 2019
-            None,       # Adams Canyon: not in Kean study area
-            None,       # Lower Ventura: not in Kean study area
-            None,       # Juncal: partial data
-            None,       # Tule Creek: partial data
-        ],
-        
-        'State': ['CA'] * 8,
-        'VegetationType': ['Chaparral'] * 8,
-    }
-    return pd.DataFrame(data)
-
-
-# ============================================================
-# STEP 3: RUN VALIDATION COMPARISONS
-# ============================================================
-def run_validation(df, r15_values=[24.0, 50.0, 91.0]):
-    """
-    For each basin in the dataset, run calculate_gartner_volume()
-    with multiple R15 values to show sensitivity.
-    
-    When using the real USGS CSV, also runs with the recorded I15
-    value from the field to get the "apples-to-apples" comparison.
-    """
-    results = []
-    
-    # Detect if we're using the real USGS CSV or demo data
-    is_real_data = 'B23_km2' in df.columns and 'I15_recorded_mmhr' in df.columns
-    
-    for _, row in df.iterrows():
-        base = {
-            'FireName': row.get('FireName', 'Unknown'),
-            'BasinName': row.get('BasinName', row.get('name', 'Unknown')),
-        }
-        
-        # Get terrain/severity inputs
-        b23_m2 = row['B23_km2'] * 1_000_000 if 'B23_km2' in row else None
-        hm_m2  = row['HM_km2']  * 1_000_000 if 'HM_km2'  in row else None
-        
-        if b23_m2 is None or hm_m2 is None:
-            continue
-        
-        # Run at each test R15
-        for r15 in r15_values:
-            pred = calculate_gartner_volume(b23_m2, hm_m2, r15)
-            result = {**base,
-                'R15_used_mmhr': r15,
-                'Predicted_m3': pred,
-                'B23_km2': row['B23_km2'],
-                'HM_km2': row['HM_km2'],
-            }
-            
-            # Add recorded R15 run if available
-            if 'I15_recorded_mmhr' in row and not pd.isna(row['I15_recorded_mmhr']):
-                r15_rec = row['I15_recorded_mmhr']
-                pred_rec = calculate_gartner_volume(b23_m2, hm_m2, r15_rec)
-                result['R15_recorded'] = r15_rec
-                result['Predicted_at_recorded_R15'] = pred_rec
-            
-            # Add observed volume for error calculation
-            if 'Measured_Volume_m3' in row and not pd.isna(row.get('Measured_Volume_m3')):
-                obs = row['Measured_Volume_m3']
-                result['Observed_m3'] = obs
-                if obs > 0:
-                    result['Percent_Error'] = ((pred - obs) / obs) * 100
-                    result['Ratio_Pred_Obs'] = pred / obs
-            
-            if 'PFW_Predicted_24mmhr' in row:
-                result['AppPy_Predicted_24mmhr'] = row['PFW_Predicted_24mmhr']
+        gdfs = []
+        for file in os.listdir(extract_dir):
+            if file.endswith('.geojson'):
+                geojson_path = os.path.join(extract_dir, file)
+                fires = gpd.read_file(geojson_path)
                 
-            results.append(result)
+                possible_names = ['incident_n', 'FIRE_NAME', 'Fire_Name', 'Name', 'name', 'mission']
+                actual_name_col = next((col for col in possible_names if col in fires.columns), fires.columns[0])
+                
+                fires = fires.rename(columns={actual_name_col: 'incident_n'})
+                fires = fires.dissolve(by='incident_n').reset_index()
+                gdfs.append(fires.to_crs(epsg=4326))
+                
+        if gdfs:
+            return pd.concat(gdfs, ignore_index=True)
+            
+        raise FileNotFoundError("No .geojson file found in archive.")
+    except Exception as e:
+        st.error(f"Failed to load perimeter data: {e}")
+        return gpd.GeoDataFrame()
+
+# ==========================================
+# GLOBAL FIRE SELECTION & DATA CLEANING
+# ==========================================
+cal_fires = fetch_and_extract_fire_data()
+
+if not cal_fires.empty:
+    name_col = 'incident_n' if 'incident_n' in cal_fires.columns else cal_fires.columns[0]
+    fire_series = cal_fires[name_col]
+    if 'mission' in cal_fires.columns:
+        fire_series = fire_series.fillna(cal_fires['mission'])
+        
+    raw_fire_list = sorted(fire_series.dropna().astype(str).unique())
+    clean_fire_list = [f for f in raw_fire_list if not f.replace('-', '').replace(' ', '').isnumeric() and len(f) > 3]
     
-    return pd.DataFrame(results)
+    selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", clean_fire_list)
+    fire_data = cal_fires[cal_fires[name_col] == selected_fire]
+    
+    ignition_date = datetime(2021, 1, 1)
+    for col in ['START_DATE', 'ALARM_DATE', 'alarm_date', 'cont_date']:
+        if col in fire_data.columns and not pd.isna(fire_data[col].iloc[0]):
+            try:
+                ignition_date = pd.to_datetime(fire_data[col].iloc[0]).to_pydatetime()
+                break
+            except: continue
+
+    pre_fire_start = (ignition_date - timedelta(days=365)).strftime('%Y-%m-%d')
+    pre_fire_end = (ignition_date - timedelta(days=1)).strftime('%Y-%m-%d')
+    post_fire_start = (ignition_date + timedelta(days=1)).strftime('%Y-%m-%d')
+    post_fire_end = (ignition_date + timedelta(days=90)).strftime('%Y-%m-%d')
+
+    area = ee.FeatureCollection(fire_data.__geo_interface__)
+    
+    # NUCLEAR OPTIMIZATION 1: Simplify fire perimeter
+    simplified_area = area.geometry().simplify(maxError=100)
+    centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
+else:
+    st.error("No fire perimeters loaded.")
+    st.stop()
+
+def mask_s2_clouds(image):
+    qa = image.select('QA60')
+    mask = qa.bitwiseAnd(1 << 10).eq(0).And(qa.bitwiseAnd(1 << 11).eq(0))
+    return image.updateMask(mask).divide(10000)
+
+def get_safe_s2(start, end, geom):
+    col = ee.ImageCollection("COPERNICUS/S2_HARMONIZED").filterBounds(geom).filterDate(start, end)
+    dummy = ee.Image.constant([0.0001, 0.0001]).rename(['B8', 'B12'])
+    
+    def process_s2():
+        return col.map(mask_s2_clouds).select(['B8', 'B12']).median()
+        
+    return ee.Image(ee.Algorithms.If(col.size().gt(0), process_s2(), dummy)).clip(geom)
+
+# ==========================================
+# PAGE 1: INCIDENT BRIEFING
+# ==========================================
+if page == "1. Incident Briefing":
+    st.title(f"Incident Briefing: {selected_fire}")
+    total_ac = (fire_data.to_crs(epsg=3310).area.sum()) * 0.000247105
+    st.metric("Total Acres Burned", f"{total_ac:,.0f} ac")
+    st.metric("Estimated Ignition Date", ignition_date.strftime('%B %d, %Y'))
+    
+    m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles="CartoDB positron")
+    folium.GeoJson(fire_data.geometry, style_function=lambda x: {'fillColor': 'red', 'color': 'darkred', 'weight': 2, 'fillOpacity': 0.4}).add_to(m)
+    st_folium(m, use_container_width=True, height=500)
+
+# ==========================================
+# PAGE 2: SPATIAL MODELING LAB
+# ==========================================
+elif page == "2. Spatial Modeling Lab":
+    st.title("Spatial Modeling Lab (Engineering View)")
+    
+    SLOPE_LIMIT = 23 
+    DNBR_THRESHOLD = 0.15
+    
+    st.sidebar.info(f"**Critical Slope:** >= {SLOPE_LIMIT} Degrees\n\n**Severity (dNBR):** > {DNBR_THRESHOLD}")
+    
+    st.sidebar.markdown("### Map Controls")
+    basemap_choice = st.sidebar.radio("Reference Basemap:", ["Satellite", "Terrain", "Minimal"])
+    
+    st.sidebar.markdown("### Layer Visibility")
+    show_risk = st.sidebar.checkbox("Composite Hazard Score", value=True)
+    show_slope = st.sidebar.checkbox("Topographic Velocity (Slope)", value=False)
+    show_concavity = st.sidebar.checkbox("Initiation Points (Hollows)", value=False) 
+    show_severity = st.sidebar.checkbox("Burn Severity (dNBR)", value=False)
+    show_soils = st.sidebar.checkbox("Soil Erodibility (Sand %)", value=False)
+    show_streams = st.sidebar.checkbox("HydroSHEDS Stream Routing", value=True)
+    show_roads = st.sidebar.checkbox("TIGER Roads", value=True)
+
+    with st.spinner("Compiling Spatial Intersection Data..."):
+        dem = ee.Image("USGS/SRTMGL1_003")
+        slope = ee.Terrain.slope(dem).clip(simplified_area)
+        slope_mask = slope.gte(SLOPE_LIMIT)
+
+        local_mean = dem.focal_mean(radius=50, units='meters').clip(simplified_area)
+        concavity_mask = dem.subtract(local_mean).lt(-3) 
+
+        s2_pre = get_safe_s2(pre_fire_start, pre_fire_end, simplified_area)
+        s2_post = get_safe_s2(post_fire_start, post_fire_end, simplified_area)
+        
+        dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
+        severity_mask = dnbr.gte(DNBR_THRESHOLD)
+
+        erodible_soils = ee.Image("OpenLandMap/SOL/SOL_SAND-WFRACTION_USDA-3A1A1A_M/v02").select('b0').clip(simplified_area)
+        soil_risk_mask = erodible_soils.gte(40) 
+        
+        slope_safe = ee.Image(slope_mask).unmask(0).select(0).toInt()
+        sev_safe = ee.Image(severity_mask).unmask(0).select(0).toInt()
+        soil_safe = ee.Image(soil_risk_mask).unmask(0).select(0).toInt()
+
+        risk_score = slope_safe.add(sev_safe).add(soil_safe)
+        hazard_intersection = risk_score.gte(2).selfMask() 
+
+        roads_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("TIGER/2016/Roads").filterBounds(simplified_area), 1, 2)
+        streams_img = ee.Image(0).mask(0).paint(ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area), 1, 1)
+
+        if basemap_choice == "Satellite":
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google Hybrid')
+            perimeter_color = 'white'
+        elif basemap_choice == "Terrain":
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}', attr='Google Terrain')
+            perimeter_color = 'black'
+        else:
+            m2 = folium.Map(location=[centroid.y, centroid.x], zoom_start=12, tiles='CartoDB positron')
+            perimeter_color = 'black'
+
+        folium.GeoJson(
+            fire_data.geometry, 
+            style_function=lambda x: {'fillColor': 'transparent', 'color': perimeter_color, 'weight': 2.5, 'dashArray': '5, 5'}
+        ).add_to(m2)
+
+        C_RISK = '#FF5733'
+        C_SLOPE = 'yellow'
+        C_CONCAVITY = '#8e44ad'
+        C_SEVERITY = 'red'
+        C_STREAMS = '#3498db'
+        C_ROADS = '#2ecc71'
+
+        if show_slope: folium.TileLayer(tiles=slope_mask.selfMask().getMapId({'palette':[C_SLOPE]})['tile_fetcher'].url_format, attr='USGS', name='Slope', opacity=0.4).add_to(m2)
+        if show_concavity: folium.TileLayer(tiles=concavity_mask.selfMask().getMapId({'palette':[C_CONCAVITY]})['tile_fetcher'].url_format, attr='USGS', name='Concavity', opacity=0.6).add_to(m2)
+        if show_severity: folium.TileLayer(tiles=severity_mask.selfMask().getMapId({'palette':[C_SEVERITY]})['tile_fetcher'].url_format, attr='ESA', name='Severity', opacity=0.4).add_to(m2)
+        if show_soils: folium.TileLayer(tiles=erodible_soils.getMapId({'min': 10, 'max': 80, 'palette': ['#f4a460', '#d2691e', '#8b4513']})['tile_fetcher'].url_format, attr='Soil', name='Soils', opacity=0.7).add_to(m2)
+        if show_streams: folium.TileLayer(tiles=streams_img.getMapId({'palette':[C_STREAMS]})['tile_fetcher'].url_format, attr='WWF', name='Streams').add_to(m2)
+        if show_roads: folium.TileLayer(tiles=roads_img.getMapId({'palette':[C_ROADS]})['tile_fetcher'].url_format, attr='TIGER', name='Roads').add_to(m2)
+        if show_risk: folium.TileLayer(tiles=hazard_intersection.getMapId({'min': 1, 'max': 1, 'palette':[C_RISK]})['tile_fetcher'].url_format, attr='GEE', name='Risk', opacity=0.8).add_to(m2)
+
+        legend_items = []
+        if show_risk: legend_items.append(f'<i style="background:{C_RISK}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Hazard Intersection<br>')
+        if show_slope: legend_items.append(f'<i style="background:{C_SLOPE}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Critical Slope<br>')
+        if show_concavity: legend_items.append(f'<i style="background:{C_CONCAVITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Initiation Hollows<br>')
+        if show_severity: legend_items.append(f'<i style="background:{C_SEVERITY}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Severe dNBR<br>')
+        if show_soils: legend_items.append(f'<i style="background:linear-gradient(to right, #f4a460, #8b4513); width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Erodible Soils (Sand %)<br>')
+        if show_streams: legend_items.append(f'<i style="background:{C_STREAMS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Stream Routing<br>')
+        if show_roads: legend_items.append(f'<i style="background:{C_ROADS}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Infrastructure<br>')
+        
+        legend_items.append(f'<i style="background:transparent; border: 2px dashed {perimeter_color}; width:10px; height:10px; float:left; margin-right:5px; margin-top:3px;"></i> Fire Perimeter<br>')
+
+        legend_html = f"""
+        <div style="position: fixed; bottom: 50px; left: 50px; width: 220px; background-color: white; border:2px solid grey; z-index:9999; font-size:12px; padding: 10px;">
+        <b>PF-WRP Legend</b><br>
+        {''.join(legend_items)}
+        </div>"""
+        
+        m2.get_root().html.add_child(folium.Element(legend_html))
+
+        toggle_key = f"lab_{selected_fire}_v{show_risk}{show_slope}{show_concavity}{show_severity}{show_soils}{show_streams}{show_roads}_{basemap_choice}"
+        st_folium(m2, use_container_width=True, height=700, key=toggle_key)
+
+# ==========================================
+# PAGE 3: PREDICTIVE DEBRIS FLOW MODELING
+# ==========================================
+elif page == "3. Predictive Debris Flow Modeling": # <--- This must perfectly match Location 1
+    st.title("Predictive Debris Flow Modeling") # <--- You can also update the big page title here
+    
+    st.sidebar.markdown("### Operational Weather Inputs")
+    design_storm_mmhr = st.sidebar.slider(
+        "Design Storm (Peak 15-min Rainfall Intensity in mm/hr)", 
+        min_value=10.0, max_value=60.0, value=24.0, step=2.0,
+        help="CAL FIRE often evaluates baselines at 24mm/hr. Higher values simulate intense atmospheric rivers."
+    )
+    
+    with st.spinner(f"Executing zonal statistics via Earth Engine & running Gartner 2014 Regression for {design_storm_mmhr} mm/hr..."):
+        SLOPE_LIMIT = 23
+        DNBR_THRESHOLD = 0.15
+
+        dem = ee.Image("USGS/SRTMGL1_003")
+        slope_mask = ee.Terrain.slope(dem).clip(simplified_area).gte(SLOPE_LIMIT)
+
+        s2_pre = get_safe_s2(pre_fire_start, pre_fire_end, simplified_area)
+        s2_post = get_safe_s2(post_fire_start, post_fire_end, simplified_area)
+        
+        dnbr = s2_pre.normalizedDifference(['B8', 'B12']).subtract(s2_post.normalizedDifference(['B8', 'B12']))
+        severity_mask = dnbr.gte(DNBR_THRESHOLD)
+
+        b23_area_img = ee.Image(slope_mask).unmask(0).select(0).multiply(ee.Image.pixelArea()).rename('b23_m2')
+        hm_area_img = ee.Image(severity_mask).unmask(0).select(0).multiply(ee.Image.pixelArea()).rename('hm_m2')
+        combined_reducer_img = ee.Image.cat([b23_area_img, hm_area_img])
+
+        huc12 = ee.FeatureCollection("USGS/WBD/2017/HUC12").filterBounds(simplified_area)
+
+        huc12_processed = combined_reducer_img.reduceRegions(
+            collection=huc12,
+            reducer=ee.Reducer.sum(),
+            scale=250, 
+            tileScale=16 
+        ).map(lambda f: f.simplify(maxError=100))
+
+        huc_data = huc12_processed.getInfo()
+
+        # ULTIMATE MAP CRASH FIX: Strip Null Geometries at the Root JSON level
+        clean_features = []
+        for f in huc_data.get('features', []):
+            geom = f.get('geometry')
+            # Check if geometry exists AND if its coordinate array actually holds data
+            if geom is not None and geom.get('coordinates'):
+                clean_features.append(f)
+
+        basin_results = []
+        for feature in clean_features:
+            props = feature['properties']
+            name = props.get('name', 'Unknown Basin')
+            huc12_id = props.get('huc12', 'Unknown ID')
+
+            raw_b23 = props.get('b23_m2')
+            raw_hm = props.get('hm_m2')
+
+            b23_m2 = float(raw_b23) if raw_b23 is not None else 0.0
+            hm_m2 = float(raw_hm) if raw_hm is not None else 0.0
+
+            sediment_yield_m3 = calculate_gartner_volume(b23_m2, hm_m2, design_storm_mmhr)
+
+            basin_results.append({
+                'HUC12_ID': huc12_id,
+                'Basin Name': name,
+                'Critical Slope Area (Acres)': b23_m2 * 0.000247105,
+                'Severe Burn Area (Acres)': hm_m2 * 0.000247105,
+                'Simulated Storm (mm/hr)': design_storm_mmhr,
+                'Sediment Yield (m³)': sediment_yield_m3
+            })
+
+        df_results = pd.DataFrame(basin_results).sort_values(by='Sediment Yield (m³)', ascending=False)
+
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown("### Watershed Matrix")
+            st.dataframe(df_results[['Basin Name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)']].style.format({"Sediment Yield (m³)": "{:,.0f}", "Critical Slope Area (Acres)": "{:,.1f}"}), use_container_width=True)
+            st.info("Sediment Math Engine:\nVolumes calculated using the USGS Gartner et al. (2014) empirical logistic regression model. Utilizing localized B23 (slope >= 23 degrees) and HM (Moderate/High Severity) areas against the predictive user-defined storm intensity.")
+            
+            st.markdown("---")
+            clean_fire_name = selected_fire.replace(" ", "_")
+            
+            gdf_export = gpd.GeoDataFrame.from_features(clean_features)
+            if not gdf_export.empty:
+                gdf_export = gdf_export[gdf_export.geometry.notna()]
+                gdf_export = gdf_export[gdf_export.geometry.is_valid & ~gdf_export.geometry.is_empty]
+                gdf_export = gdf_export.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+                geojson_data = gdf_export.to_json()
+            else:
+                geojson_data = "{}"
+            
+            csv_data = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Executive Report (CSV)",
+                data=csv_data,
+                file_name=f"{clean_fire_name}_Watershed_Vulnerability_Report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+            st.download_button(
+                label="Download Operational Polygons (GeoJSON)",
+                data=geojson_data,
+                file_name=f"{clean_fire_name}_Debris_Flow_Hazards.geojson",
+                mime="application/geo+json",
+                use_container_width=True
+            )
+
+            st.markdown("---")
+            st.success("Stream Transport Dynamics:\nLine thickness represents Average Long-Term Discharge. Rivers cutting through high-yield (dark red) basins act as the primary drainage funnel and are at extreme risk of inundation.")
+
+        with col2:
+            st.markdown("### Predictive Basin Choropleth")
+            
+            gdf = gpd.GeoDataFrame.from_features(clean_features)
+            if not gdf.empty:
+                gdf = gdf[gdf.geometry.notna()]
+                gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
+                gdf.set_crs(epsg=4326, inplace=True)
+                gdf = gdf.merge(df_results, left_on='huc12', right_on='HUC12_ID')
+
+                m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles='CartoDB positron')
+
+                folium.GeoJson(
+                    fire_data.geometry, 
+                    style_function=lambda x: {'fillColor': 'transparent', 'color': 'black', 'weight': 2, 'dashArray': '5, 5'}
+                ).add_to(m3)
+
+                folium.Choropleth(
+                    geo_data=gdf,
+                    name='Sediment Yield',
+                    data=df_results,
+                    columns=['HUC12_ID', 'Sediment Yield (m³)', 'Basin Name'],
+                    key_on='feature.properties.huc12',
+                    fill_color='YlOrRd',
+                    fill_opacity=0.7,
+                    line_opacity=0.3,
+                    legend_name='Estimated Sediment Yield (Cubic Meters)'
+                ).add_to(m3)
+
+                streams = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(simplified_area)
+                
+                def style_streams(f):
+                    discharge = ee.Number(f.get('DIS_AV_CMS')).add(1) 
+                    log_dis = discharge.log10()
+                    line_width = log_dis.multiply(1.5).add(0.5)
+                    return f.set('acc_width', line_width).set('acc_color', log_dis)
+
+                styled_streams = streams.map(style_streams)
+                stream_img = ee.Image(0).mask(0).paint(styled_streams, 'acc_color', 'acc_width')
+                
+                stream_vis = stream_img.getMapId({
+                    'min': 0, 
+                    'max': 2.5, 
+                    'palette': ['#00b4d8', '#0077b6', '#03045e'] 
+                })
+                
+                folium.TileLayer(
+                    tiles=stream_vis['tile_fetcher'].url_format, 
+                    attr='WWF', 
+                    name='Stream Transport (Discharge)', 
+                    overlay=True
+                ).add_to(m3)
+
+                tooltip = folium.GeoJsonTooltip(
+                    fields=['name', 'Sediment Yield (m³)', 'Critical Slope Area (Acres)'],
+                    aliases=['Basin:', 'Est. Yield (m³):', 'B23 Area (Acres):'],
+                    localize=True
+                )
+                folium.GeoJson(
+                    gdf,
+                    style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent'},
+                    tooltip=tooltip
+                ).add_to(m3)
+
+                st_folium(m3, use_container_width=True, height=600, key=f"huc12_{selected_fire}")
+            else:
+                st.warning("No valid basin geometries found to draw on the map.")
+
+# ==========================================
+# PAGE 4: DOCUMENTATION & METHODOLOGY
+# ==========================================
+elif page == "4. Documentation & Methodology":
+    st.title("System Documentation & Scientific Methodology")
+    st.markdown("---")
+    
+    tab1, tab2 = st.tabs(["Operational User Guide", "Scientific Methodology"])
+    
+    with tab1:
+        st.markdown("### Incident Command Workflow")
+        
+        st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/15/Debris_flow.jpg/800px-Debris_flow.jpg", caption="Debris flow inundation zone.", use_container_width=True)
+        
+        st.info("Overview: The Post-Fire Watershed Risk Portal (PF-WRP) is a decision support system designed to rapidly assess debris flow and sediment loading risks following wildfire events.")
+
+        st.markdown("""
+        #### Step 1: Select the Incident
+        Navigate to the **Incident Briefing** module using the sidebar to select a specific fire perimeter from the master dataset. Ensure the fire perimeter and ignition dates align with current incident records.
+
+        #### Step 2: Interrogate Spatial Drivers
+        Navigate to the **Spatial Modeling Lab**. Use the map controls and layer visibility toggles to isolate specific geomorphic risk factors (e.g., Burn Severity, Critical Slope, Initiation Hollows). This step visualizes the composite hazard score and identifies spatial initiation zones prior to calculating downstream watershed impacts.
+
+        #### Step 3: Simulate Predictive Rainfall
+        Navigate to **Phase 3: Watershed Loading**. Utilize the Operational Weather Inputs sidebar to input the anticipated **Peak 15-minute Rainfall Intensity (mm/hr)** for upcoming storm systems. 
+        """)
+        
+        st.warning("Note: CAL FIRE baseline evaluations typically begin at 24mm/hr. Higher values should be used to simulate intense atmospheric river events.")
+
+        st.markdown("""
+        #### Step 4: Export Operational Data
+        Once the Earth Engine completes the HUC-12 basin calculations, utilize the export buttons to download:
+        * **Executive Report (CSV):** For quantitative review and rapid triage by the WERT team.
+        * **Operational Polygons (GeoJSON):** For direct integration into local offline GIS systems or evacuation routing software.
+        """)
+
+    with tab2:
+        st.markdown("### Understanding the Hazard Parameters")
+        st.markdown("To predict a debris flow, the system maps the landscape to find where four specific conditions overlap. A basin is considered high-risk when these factors combine during a severe rainstorm.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("""
+            **1. Topographic Velocity (Critical Slope)**
+            * **The Threshold:** Slopes greater than or equal to 23 Degrees.
+            * **Why it matters:** Debris flows require steep terrain to gain momentum. If a hillside is too flat, water just creates puddles or slow-moving mud. At 23 degrees, gravity becomes stronger than the friction holding the soil to the mountain, allowing massive walls of mud to rapidly accelerate downhill.
+            * **Scientific Source:** [Staley, D. M., et al. (2017)](https://agupubs.onlinelibrary.wiley.com/doi/pdf/10.1002/2017GL074243).
+            
+            **2. Topographic Concavity (Initiation Points)**
+            * **The Threshold:** Local elevation less than -3m relative to the surrounding area.
+            * **Why it matters:** Water sheds off the top of ridges and gathers in valleys, hollows, and ravines (concave features). Debris flows rarely start on flat cliff faces; they initiate in these hollows where surface water naturally funnels together and concentrates its erosive energy.
+            * **Scientific Source:** [Rengers, F. K., et al. (2018)](https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2018JF004837).
+            """)
+            
+        with col2:
+            st.markdown("""
+            **3. Burn Severity (dNBR)**
+            * **The Threshold:** dNBR > 0.15 (Moderate to High Severity).
+            * **Why it matters:** When a fire burns incredibly hot, it doesn't just destroy the tree roots holding the dirt together. It actually vaporizes organic matter in the soil, which cools and forms a waxy, water-repellent (hydrophobic) crust on the ground. When rain hits this baked crust, it cannot soak in. Almost 100 percent of the water rushes downhill instantly.
+            * **Scientific Source:** [Key, C. H., & Benson, N. C. (2006)](https://research.fs.usda.gov/treesearch/24042).
+
+            **4. Soil Erodibility**
+            * **The Threshold:** Measured by the percentage of sand in the soil profile.
+            * **Why it matters:** Not all dirt is created equal. Clay soils are sticky and cohesive, meaning they hold together well even when wet. Sandy, loose soils (high sand mass fraction) have no binding agents and are easily detached and swept away by fast-moving water.
+            * **Scientific Source:** [Hengl, T., et al. (2023)](https://essd.copernicus.org/articles/18/989/2026/).
+            """)
+
+        st.markdown("---")
+        st.markdown("### The Sediment Math Engine")
+        st.success("Identifying the danger zones is only the first step. The system then uses historical data to predict exactly how much mud and rock will come out of those mountains.")
+
+        st.markdown("""
+        **The Gartner Model**
+        After evaluating hundreds of real-world debris flows in Southern California, USGS scientists discovered a pattern. They created a formula that looks at the steepness of a basin, how badly it burned, and the intensity of a rainstorm to predict the total volume of the resulting debris flow. This system automates that exact formula.
+        
+        **The Calculation Variables:**
+        * **V (Volume):** The final estimated size of the debris flow in cubic meters.
+        * **B23 (Basin Area):** The total area of the watershed that is steeper than 23 degrees.
+        * **HM (High/Moderate Burn):** The total area of the watershed that suffered severe fire damage.
+        * **R15 (Rainfall):** The user-defined peak 15-minute rainfall intensity (e.g., 24 mm/hr).
+
+        **Source Documentation:** [USGS Empirical Logistic Regression - Gartner et al., 2014](https://pubs.usgs.gov/publication/70188574).
+        """)
 
 
-# ============================================================
-# STEP 4: STATISTICAL SUMMARY
-# ============================================================
-def compute_statistics(results_df, r15_filter=24.0):
-    """Compute error metrics for a specific R15 scenario."""
-    subset = results_df[
-        (results_df['R15_used_mmhr'] == r15_filter) & 
-        results_df['Observed_m3'].notna()
-    ]
-    
-    if subset.empty:
-        return {}
-    
-    obs  = subset['Observed_m3'].values
-    pred = subset['Predicted_m3'].values
-    
-    rmse = np.sqrt(np.mean((pred - obs)**2))
-    mae  = np.mean(np.abs(pred - obs))
-    bias = np.mean(pred - obs)
-    
-    log_obs  = np.log(obs[obs > 0])
-    log_pred = np.log(pred[obs > 0])
-    r2 = stats.pearsonr(log_obs, log_pred)[0]**2 if len(log_obs) > 1 else None
-    
-    return {
-        'R15 (mm/hr)': r15_filter,
-        'N basins': len(subset),
-        'RMSE (m³)': round(rmse, 0),
-        'MAE (m³)': round(mae, 0),
-        'Mean Bias (m³)': round(bias, 0),
-        'R² (log space)': round(r2, 3) if r2 else 'N/A',
-        'Mean % Error': round(subset['Percent_Error'].mean(), 1) if 'Percent_Error' in subset else 'N/A',
-    }
 
 
-# ============================================================
-# STEP 5: GENERATE VALIDATION PLOTS
-# ============================================================
-def generate_plots(results_df, output_path="validation_plots.png"):
-    """
-    4-panel validation figure:
-      1. Predicted vs Observed (log scale, per R15 scenario)
-      2. R15 Sensitivity — how volume changes with storm intensity
-      3. Percent Error by basin
-      4. Predicted volume comparison: 24 vs recorded R15
-    """
-    fig = plt.figure(figsize=(16, 12), facecolor='#1a1a2e')
-    fig.suptitle("PF-WRP Validation Dashboard\nGartner (2014) Engine vs. Published Field Data", 
-                 fontsize=16, color='white', fontweight='bold', y=0.98)
-    
-    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.35)
-    ax_colors = {'bg': '#16213e', 'text': 'white', 'grid': '#2d4a7a',
-                 'c24': '#e94560', 'c50': '#f5a623', 'c91': '#4ecdc4', 'obs': '#a8e063'}
-    
-    # ---- PANEL 1: Predicted vs Observed (log-log) ----
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.set_facecolor(ax_colors['bg'])
-    
-    has_obs = results_df['Observed_m3'].notna()
-    for r15, color, label in [(24.0, ax_colors['c24'], '24 mm/hr (CAL FIRE baseline)'),
-                               (91.0, ax_colors['c91'], '91 mm/hr (recorded Jan 9)')]:
-        sub = results_df[(results_df['R15_used_mmhr'] == r15) & has_obs]
-        if not sub.empty:
-            ax1.scatter(sub['Observed_m3'], sub['Predicted_m3'], 
-                       color=color, s=80, zorder=5, label=label, alpha=0.9)
-    
-    # 1:1 line
-    all_vals = results_df[has_obs][['Observed_m3','Predicted_m3']].values.flatten()
-    all_vals = all_vals[all_vals > 0]
-    if len(all_vals) > 0:
-        lim = [all_vals.min()*0.5, all_vals.max()*2]
-        ax1.plot(lim, lim, 'w--', alpha=0.5, linewidth=1, label='1:1 Perfect Fit')
-        ax1.set_xlim(lim); ax1.set_ylim(lim)
-        ax1.set_xscale('log'); ax1.set_yscale('log')
-    
-    ax1.set_xlabel('Measured Volume (m³)', color=ax_colors['text'])
-    ax1.set_ylabel('Predicted Volume (m³)', color=ax_colors['text'])
-    ax1.set_title('Predicted vs. Observed\n(log scale)', color=ax_colors['text'], fontsize=11)
-    ax1.legend(fontsize=7, facecolor=ax_colors['bg'], labelcolor='white')
-    ax1.tick_params(colors=ax_colors['text'])
-    ax1.grid(True, color=ax_colors['grid'], alpha=0.4)
-    for spine in ax1.spines.values(): spine.set_color(ax_colors['grid'])
 
-    # ---- PANEL 2: R15 Sensitivity ----
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax2.set_facecolor(ax_colors['bg'])
-    
-    r15_range = np.linspace(10, 120, 200)
-    basin_samples = results_df.drop_duplicates('BasinName').head(4)
-    colors_basins = [ax_colors['c24'], ax_colors['c50'], ax_colors['c91'], '#ff6b6b']
-    
-    for (_, row), color in zip(basin_samples.iterrows(), colors_basins):
-        vols = [calculate_gartner_volume(
-                    row['B23_km2'] * 1e6, row['HM_km2'] * 1e6, r) 
-                for r in r15_range]
-        ax2.plot(r15_range, vols, color=color, linewidth=2, 
-                label=row['BasinName'][:20])
-    
-    ax2.axvline(x=24, color='white', linestyle='--', alpha=0.6, linewidth=1.2, label='24 mm/hr baseline')
-    ax2.axvline(x=91, color='#4ecdc4', linestyle=':', alpha=0.8, linewidth=1.2, label='91 mm/hr recorded')
-    ax2.set_xlabel('R15 Rainfall Intensity (mm/hr)', color=ax_colors['text'])
-    ax2.set_ylabel('Predicted Volume (m³)', color=ax_colors['text'])
-    ax2.set_title('R15 Sensitivity Analysis\nVolume vs. Storm Intensity', color=ax_colors['text'], fontsize=11)
-    ax2.legend(fontsize=7, facecolor=ax_colors['bg'], labelcolor='white')
-    ax2.tick_params(colors=ax_colors['text'])
-    ax2.grid(True, color=ax_colors['grid'], alpha=0.4)
-    for spine in ax2.spines.values(): spine.set_color(ax_colors['grid'])
-    
-    # ---- PANEL 3: Percent Error by Basin ----
-    ax3 = fig.add_subplot(gs[1, 0])
-    ax3.set_facecolor(ax_colors['bg'])
-    
-    err_df = results_df[(results_df['R15_used_mmhr'] == 24.0) & results_df['Percent_Error'].notna()]
-    if not err_df.empty:
-        colors_bar = [ax_colors['c24'] if e > 0 else ax_colors['c91'] 
-                     for e in err_df['Percent_Error']]
-        bars = ax3.barh(err_df['BasinName'], err_df['Percent_Error'], 
-                       color=colors_bar, alpha=0.85, edgecolor='none')
-        ax3.axvline(0, color='white', linewidth=1)
-        ax3.set_xlabel('% Error (Positive = Overpredict)', color=ax_colors['text'])
-        ax3.set_title('Prediction Error by Basin\n(at 24 mm/hr)', color=ax_colors['text'], fontsize=11)
-        ax3.tick_params(colors=ax_colors['text'])
-        for spine in ax3.spines.values(): spine.set_color(ax_colors['grid'])
-        ax3.grid(True, color=ax_colors['grid'], alpha=0.4, axis='x')
-    else:
-        ax3.text(0.5, 0.5, 'Insufficient observed\ndata for error analysis\n\nDownload USGS CSV\ndoi.org/10.5066/P13EZSWW',
-                ha='center', va='center', color='white', fontsize=10,
-                transform=ax3.transAxes)
-        ax3.set_title('Prediction Error by Basin', color=ax_colors['text'], fontsize=11)
-
-    # ---- PANEL 4: 24 vs Recorded R15 Comparison ----
-    ax4 = fig.add_subplot(gs[1, 1])
-    ax4.set_facecolor(ax_colors['bg'])
-    
-    sub24 = results_df[results_df['R15_used_mmhr'] == 24.0].copy()
-    sub91 = results_df[results_df['R15_used_mmhr'] == 91.0].copy()
-    
-    if not sub24.empty and not sub91.empty:
-        basins = sub24['BasinName'].tolist()
-        x = np.arange(len(basins))
-        w = 0.35
-        ax4.barh(x + w/2, sub24['Predicted_m3'], w, color=ax_colors['c24'], 
-                label='Predicted @ 24 mm/hr', alpha=0.85)
-        ax4.barh(x - w/2, sub91['Predicted_m3'], w, color=ax_colors['c91'], 
-                label='Predicted @ 91 mm/hr', alpha=0.85)
-        ax4.set_yticks(x)
-        ax4.set_yticklabels([b[:22] for b in basins], fontsize=7, color=ax_colors['text'])
-        ax4.set_xlabel('Predicted Volume (m³)', color=ax_colors['text'])
-        ax4.set_title('Storm Scenario Comparison\n24 mm/hr vs Recorded 91 mm/hr', 
-                     color=ax_colors['text'], fontsize=11)
-        ax4.legend(fontsize=8, facecolor=ax_colors['bg'], labelcolor='white')
-        ax4.tick_params(colors=ax_colors['text'])
-        ax4.grid(True, color=ax_colors['grid'], alpha=0.4, axis='x')
-        for spine in ax4.spines.values(): spine.set_color(ax_colors['grid'])
-    
-    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
-    print(f"Saved validation plots → {output_path}")
-    plt.close()
-
-
-# ============================================================
-# STEP 6: KEY FINDINGS REPORT
-# ============================================================
-def print_findings(results_df):
-    print("\n" + "="*65)
-    print("PF-WRP VALIDATION FINDINGS")
-    print("="*65)
-    
-    # R15 sensitivity: how much does storm choice matter?
-    basins = results_df['BasinName'].unique()
-    print("\n[1] STORM INTENSITY SENSITIVITY (R15 Effect)")
-    print(f"    {'Basin':<35} {'@24 mm/hr':>12} {'@91 mm/hr':>12} {'Ratio':>8}")
-    print("    " + "-"*67)
-    for basin in basins[:6]:
-        v24 = results_df[(results_df['BasinName']==basin) & 
-                         (results_df['R15_used_mmhr']==24.0)]['Predicted_m3']
-        v91 = results_df[(results_df['BasinName']==basin) & 
-                         (results_df['R15_used_mmhr']==91.0)]['Predicted_m3']
-        if not v24.empty and not v91.empty:
-            ratio = v91.values[0] / v24.values[0]
-            print(f"    {basin:<35} {v24.values[0]:>12,.0f} {v91.values[0]:>12,.0f} {ratio:>7.1f}x")
-    
-    print("\n[2] KEY FINDING: R15 UNDERPREDICTION GAP")
-    print("    Your app uses R15 = 24 mm/hr (CAL FIRE baseline).")
-    print("    Kean et al. (2019) recorded I15 = 78-105 mm/hr on Jan 9, 2018.")
-    print("    This ~4x difference in R15 drives a large systematic underprediction.")
-    print("    This is DEFENSIBLE: your tool is designed as a pre-storm")
-    print("    planning tool using forecast intensity, not recorded peak.")
-    print("    RECOMMEND: Add 'return period' framing in your SOP.")
-    
-    print("\n[3] CRITICAL SCOPE LIMITATION TO STATE IN PRESENTATION")
-    print("    Gartner (2014) was calibrated on S. California chaparral.")
-    print("    It OVERPREDICTS in Rocky Mountain / mixed conifer burns")
-    print("    (Grizzly Creek Fire study, NHESS 2024).")
-    print("    Your Thomas Fire hindcast is in the model's home terrain —")
-    print("    this is why it validates well.")
-    
-    print("\n[4] NEXT STEPS FOR FULL VALIDATION")
-    print("    1. Download USGS CSV: https://doi.org/10.5066/P13EZSWW")
-    print("    2. Filter to CA fires: Thomas, Station, Sayre, Cedar, El Dorado")
-    print("    3. Re-run this script — error metrics will auto-populate")
-    print("    4. Add Dixie Fire (2021) test — mega-fire stress test")
-    
-    print("\n[5] FIRES IN USGS DATASET AVAILABLE FOR VALIDATION")
-    ca_fires = [
-        "Thomas (2017)", "Station (2009)", "Sayre (2008)", 
-        "Cedar (2003)", "Grand Prix (2003)", "Old (2003)",
-        "Harvard (2005)", "El Dorado (2020)", "Apple (2020)",
-        "Carmel (2020)", "Dixie (2021)", "Mosquito (2022)"
-    ]
-    for f in ca_fires:
-        print(f"    • {f}")
-    
-    print("="*65 + "\n")
-
-
-# ============================================================
-# MAIN
-# ============================================================
-if __name__ == "__main__":
-    print("\nPF-WRP Validation Pipeline")
-    print("Anthony Brandi | Cal Poly SLO CAFES Symposium 2026")
-    print("-"*50)
-    
-    # Load data (uses demo if CSV not found)
-    df = load_usgs_inventory()
-    
-    # Run validation at three R15 scenarios
-    print("Running Gartner engine at R15 = 24, 50, 91 mm/hr...")
-    results = run_validation(df, r15_values=[24.0, 50.0, 91.0])
-    
-    # Save results
-    results.to_csv("validation_results.csv", index=False)
-    print(f"Saved validation_results.csv ({len(results)} rows)")
-    
-    # Stats for the 24 mm/hr scenario
-    stats_24 = compute_statistics(results, r15_filter=24.0)
-    if stats_24:
-        print("\nError Metrics @ 24 mm/hr:")
-        for k, v in stats_24.items():
-            print(f"  {k}: {v}")
-    
-    # Generate plots
-    generate_plots(results)
-    
-    # Print findings
-    print_findings(results)
-    
-    print("Done. Open validation_plots.png and validation_results.csv to review.")
