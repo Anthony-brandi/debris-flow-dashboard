@@ -57,13 +57,13 @@ def load_and_clean_data():
 cal_fires = load_and_clean_data()
 
 if not cal_fires.empty:
-    fire_list = sorted(cal_fires['incident_n'].fillna(cal_fires['mission']).dropna().unique())
+    fire_list = sorted(cal_fires['incident_n'].dropna().unique())
     selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", fire_list)
     fire_data = cal_fires[cal_fires['incident_n'] == selected_fire]
     
     # Dynamic Ignition Date Extractor
     ignition_date = datetime(2021, 1, 1) # Fallback
-    for col in ['START_DATE', 'ALARM_DATE', 'alarm_date', 'cont_date']:
+    for col in ['final_date', 'START_DATE', 'ALARM_DATE', 'alarm_date', 'cont_date']:
         if col in fire_data.columns and not pd.isna(fire_data[col].iloc[0]):
             try:
                 ignition_date = pd.to_datetime(fire_data[col].iloc[0]).to_pydatetime()
