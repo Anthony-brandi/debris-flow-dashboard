@@ -10,6 +10,17 @@ import ee
 import json
 from datetime import datetime, timedelta
 
+try:
+    key_data = json.loads(st.secrets['GEE_SERVICE_ACCOUNT_JSON'])
+    credentials = ee.ServiceAccountCredentials(
+        email=key_data['client_email'],
+        key_data=json.dumps(key_data)
+    )
+    ee.Initialize(credentials, project='gee-streamlit-app-490500')
+except Exception as e:
+    st.error(f'Earth Engine Initialization Error: {e}')
+    st.stop()
+
 # ==========================================
 # 1. PAGE SETUP & ARCHITECTURE
 # ==========================================
@@ -21,21 +32,6 @@ page = st.sidebar.radio("Select Module:", [
     "2. Spatial Modeling Lab", 
     "3. Watershed Loading (Phase 2)"
 ])
-
-# ==========================================
-# 2. GEE INITIALIZATION
-# ==========================================
-if 'ee_initialized' not in st.session_state:
-    try:
-        if "EARTHENGINE_JSON" in st.secrets:
-            creds_dict = json.loads(st.secrets["EARTHENGINE_JSON"])
-            credentials = ee.ServiceAccountCredentials(creds_dict['client_email'], key_data=st.secrets["EARTHENGINE_JSON"])
-            ee.Initialize(credentials, project='strange-bird-461405-v7')
-        else:
-            ee.Initialize(project='strange-bird-461405-v7')
-        st.session_state['ee_initialized'] = True
-    except Exception as e:
-        st.error(f"Earth Engine Initialization Error: {e}")
 
 @st.cache_data
 def load_and_clean_data():
