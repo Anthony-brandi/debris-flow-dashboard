@@ -1,4 +1,6 @@
 import os
+import zipfile
+import io
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
@@ -39,7 +41,10 @@ if 'ee_initialized' not in st.session_state:
 def load_and_clean_data():
     path = os.path.join(os.path.dirname(__file__), 'Master_Fire_Dataset.geojson.zip')
     try:
-        fires = gpd.read_file(f'zip://{path}')
+        with zipfile.ZipFile(path) as z:
+            name = [n for n in z.namelist() if n.endswith('.geojson')][0]
+            with z.open(name) as f:
+                fires = gpd.read_file(io.BytesIO(f.read()))
         fires = fires.dissolve(by='incident_n').reset_index()
         return fires.to_crs(epsg=4326)
     except Exception as e:
