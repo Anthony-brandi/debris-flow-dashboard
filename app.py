@@ -207,4 +207,4 @@ elif page == "2. Spatial Modeling Lab":
 # PAGE 3: WATERSHED LOADING (PHASE 2)
 # ==========================================
 elif page == "3. Watershed Loading (Phase 2)":
-    st.warning("Phase 2 Module: Vulnerability Matrix and Sediment Yield Calculations are currently under development.")≠
+    st.warning("Phase 2 Module: Vulnerability Matrix and Sediment Yield Calculations are currently under development.")
