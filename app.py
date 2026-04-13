@@ -159,6 +159,12 @@ if not cal_fires.empty:
 
     area = ee.FeatureCollection(fire_data.__geo_interface__)
     simplified_area = area.geometry().simplify(maxError=100)
+st.session_state["simplified_area_json"] = str(simplified_area.getInfo())
+st.session_state["pre_fire_start"]  = pre_fire_start
+st.session_state["pre_fire_end"]    = pre_fire_end
+st.session_state["post_fire_start"] = post_fire_start
+st.session_state["post_fire_end"]   = post_fire_end
+st.session_state["selected_fire"]   = selected_fire
     centroid = fire_data.to_crs(epsg=3310).geometry.centroid.to_crs(epsg=4326).iloc[0]
 else:
     st.error("No fire perimeters loaded.")
