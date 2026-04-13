@@ -140,6 +140,7 @@ if not cal_fires.empty:
     ]
 
     selected_fire = st.sidebar.selectbox("Select Wildfire Perimeter", clean_fire_list)
+    st.session_state["selected_fire"] = selected_fire
     fire_data = cal_fires[cal_fires[name_col] == selected_fire]
 
     ignition_date = datetime(2021, 1, 1)
@@ -399,11 +400,11 @@ elif page == "3. Predictive Debris Flow Modeling":
                 'Severe Burn Area (Acres)':    hm_m2  * 0.000247105,
                 'Simulated Storm (mm/hr)':     design_storm_mmhr,
                 'Sediment Yield (m³)':         vol
-            })
+          })
 
-        df_results = pd.DataFrame(basin_results).sort_values(
-            by='Sediment Yield (m³)', ascending=False
-        )
+        df_results = pd.DataFrame(basin_results).sort_values(by='Sediment Yield (m³)', ascending=False)
+        st.session_state["hindcast_results"] = df_results
+        st.session_state["selected_fire"] = selected_fire
 
         col1, col2 = st.columns([1, 2])
 
