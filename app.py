@@ -80,6 +80,7 @@ if 'ee_initialized' not in st.session_state:
         st.session_state['ee_initialized'] = True
     except Exception as e:
         st.error(f"Earth Engine Initialization Error: {e}")
+        st.stop()
 
 # ==========================================
 # 4. FIRE DATA LOADER
