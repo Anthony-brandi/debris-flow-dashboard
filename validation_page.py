@@ -32,9 +32,9 @@ def load_inventory(csv_path: str) -> pd.DataFrame:
     """
     required_cols = [
         "WatershedID", "Source", "Volume_m3",
-        "Area_km2", "Relief_m", "MeanSlope_deg",
+        "Area_km2", "Relief_m", "MeanSlope_degrees",
         "i15_mm/h", "i30_mm/h", "i60_mm/h",
-        "FractionBurned", "MeanNBR", "EPALevelIIIEcoregion"
+        "FractionBurned", "MeandNBR", "EPALevelIIIEcoregion"
     ]
 
     try:
@@ -318,7 +318,7 @@ def page_validation():
     color_col = "Model_Warning" if show_warnings else "Source"
     hover_cols = [
         "WatershedID", "Source", "Area_km2", "Relief_m",
-        "i15_mm/h", "FractionBurned", "MeanNBR", "Model_Warning"
+        "i15_mm/h", "FractionBurned", "MeandNBR", "Model_Warning"
     ]
     # Only include hover cols that exist in df_filtered
     hover_cols = [c for c in hover_cols if c in df_filtered.columns]
@@ -434,7 +434,7 @@ def page_validation():
         display_cols = [
             "WatershedID", "Source", "EPALevelIIIEcoregion",
             "Volume_m3", "Predicted_Volume_m3", "Residual_m3",
-            "Area_km2", "Relief_m", "i15_mm/h", "FractionBurned", "MeanNBR"
+            "Area_km2", "Relief_m", "i15_mm/h", "FractionBurned", "MeandNBR"
         ]
         display_cols = [c for c in display_cols if c in df_filtered.columns]
         st.dataframe(
