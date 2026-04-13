@@ -614,7 +614,7 @@ elif page == "4. Documentation & Methodology":
 # ==========================================
 elif page == "5. System Validation":
     try:
-        from validation_page import render_validation_page
+        from validation_page import page_validation as render_validation_page
         render_validation_page()
     except ImportError:
         st.title("System Validation Dashboard")
