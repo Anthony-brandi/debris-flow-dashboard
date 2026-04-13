@@ -6,3 +6,6 @@ streamlit-folium
 earthengine-api
 requests
 altair
+plotly
+scipy
+numpy
