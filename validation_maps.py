@@ -1,0 +1,799 @@
+# ==============================================================================
+# validation_maps.py — PF-WRP Geomorphic Residual Map Engine
+# Four-layer architecture:
+#   1. Hillshade basemap (SRTM via GEE tile)
+#   2. HUC-12 polygons colored by predicted/observed ratio
+#   3. Slope-break contour (23° threshold) — canyon boundary
+#   4. Fixed-size deposit dots at fan apex locations
+#
+# Toggle controls: deposit points, HUC-12 polygon fill, slope contour
+# Author: Anthony Brandi | Cal Poly SLO | CAFES Symposium 2026
+# ==============================================================================
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import folium
+from folium.plugins import FeatureGroupSubGroup
+from streamlit_folium import st_folium
+import math
+import ee
+import json
+
+
+# ==============================================================================
+# COLOR ENGINE
+# ==============================================================================
+
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def ratio_to_hex(ratio: float) -> str:
+    """
+    Map predicted/observed ratio to a diverging blue→white→red color scale.
+
+    ratio < 1.0  → blue  (model under-predicted)
+    ratio = 1.0  → white (perfect prediction)
+    ratio > 1.0  → red   (model over-predicted)
+
+    Scale is anchored so:
+      ratio 0.0 → deep blue  (#1565C0)
+      ratio 1.0 → near-white (#F5F0E8)
+      ratio 4.0 → deep red   (#C03915)
+    """
+    if ratio <= 0:
+        return "#1565C0"
+
+    if ratio < 1.0:
+        # Under-prediction: interpolate blue→white
+        t = clamp(ratio, 0.0, 1.0)           # 0 = deep blue, 1 = white
+        r = int(21  + t * (245 - 21))
+        g = int(101 + t * (240 - 101))
+        b = int(192 + t * (232 - 192))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    else:
+        # Over-prediction: interpolate white→red
+        t = clamp((ratio - 1.0) / 3.0, 0.0, 1.0)   # 0 = white, 1 = deep red
+        r = int(245 - t * (245 - 192))
+        g = int(240 - t * (240 - 57))
+        b = int(232 - t * (232 - 21))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def ratio_label(ratio: float) -> tuple[str, str]:
+    """Return (direction_text, sign_string) for tooltip."""
+    if ratio >= 1.0:
+        pct = (ratio - 1) * 100
+        return f"+{pct:.0f}% over-predicted", "over"
+    else:
+        pct = (1 - ratio) * 100
+        return f"−{pct:.0f}% under-predicted", "under"
+
+
+# ==============================================================================
+# DATA ENGINE
+# ==============================================================================
+
+def calculate_residuals(csv_path: str = "DebrisFlowVolume_Inventory.csv") -> dict:
+    """
+    Load USGS inventory, run Gartner (2014) at each basin's recorded i15,
+    aggregate repeat events to basin mean, and return per-fire DataFrames.
+
+    Returns:
+        dict mapping fire_name (str, uppercase) → aggregated DataFrame with columns:
+            WatershedID, DepositLatitude, DepositLongitude,
+            RainGageLatitude, RainGageLongitude,
+            Volume_m3, Predicted_m3, Ratio, Residual_m3,
+            i15, AreaModHigh_km2, Relief_m
+    """
+    df = pd.read_csv(csv_path)
+    df["FireName"] = df["FireName"].astype(str).str.strip().str.upper()
+    df = df.dropna(subset=["Volume_m3", "AreaModHigh_km2", "Relief_m", "i15_mm/h"])
+    df = df[
+        (df["Volume_m3"] > 0) &
+        (df["AreaModHigh_km2"] > 0.001) &
+        (df["Relief_m"] > 0) &
+        (df["i15_mm/h"] > 0)
+    ].copy()
+
+    def gartner(row) -> float:
+        try:
+            return math.exp(
+                4.22
+                + 0.39 * math.sqrt(float(row["i15_mm/h"]))
+                + 0.36 * math.log(float(row["AreaModHigh_km2"]))
+                + 0.13 * math.sqrt(float(row["Relief_m"]))
+            )
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+
+    df["Predicted_m3"] = df.apply(gartner, axis=1)
+    df = df[df["Predicted_m3"] > 0].copy()
+
+    fires = {}
+    for fire in ["GRAND PRIX", "STATION", "THOMAS"]:
+        sub = df[df["FireName"] == fire].copy()
+        if sub.empty:
+            fires[fire] = pd.DataFrame()
+            continue
+
+        sub = sub.groupby("WatershedID", as_index=False).agg(
+            DepositLatitude  =("DepositLatitude",   "first"),
+            DepositLongitude =("DepositLongitude",  "first"),
+            RainGageLatitude =("RainGageLatitude",  "first"),
+            RainGageLongitude=("RainGageLongitude", "first"),
+            Volume_m3        =("Volume_m3",         "mean"),
+            Predicted_m3     =("Predicted_m3",      "mean"),
+            i15              =("i15_mm/h",           "mean"),
+            AreaModHigh_km2  =("AreaModHigh_km2",   "mean"),
+            Relief_m         =("Relief_m",           "mean"),
+        )
+
+        # Ensure numeric types (groupby can produce objects on some pandas versions)
+        for col in sub.columns:
+            if col == "WatershedID":
+                continue
+            if pd.api.types.is_datetime64_any_dtype(sub[col]):
+                sub[col] = sub[col].astype(str)
+            else:
+                try:
+                    sub[col] = pd.to_numeric(sub[col])
+                except (ValueError, TypeError):
+                    pass
+
+        sub["Residual_m3"] = sub["Predicted_m3"] - sub["Volume_m3"]
+        sub["Ratio"]       = sub["Predicted_m3"] / sub["Volume_m3"]
+
+        # Drop rows where deposit coordinates are sentinel values or missing
+        sub = sub[
+            sub["DepositLatitude"].notna() &
+            ~sub["DepositLatitude"].isin([-9999])
+        ].copy()
+
+        fires[fire] = sub
+
+    return fires
+
+
+# ==============================================================================
+# GEE LAYER BUILDERS
+# ==============================================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_hillshade_url(bounds_json: str) -> str | None:
+    """
+    Fetch a GEE hillshade tile URL for the given bounding box.
+    Cached per bounds so repeated renders don't re-query GEE.
+
+    Args:
+        bounds_json: JSON string of bounding box dict
+            {"west": float, "south": float, "east": float, "north": float}
+
+    Returns:
+        Tile URL string, or None if GEE unavailable.
+    """
+    try:
+        bounds = json.loads(bounds_json)
+        geom   = ee.Geometry.BBox(
+            bounds["west"], bounds["south"],
+            bounds["east"], bounds["north"]
+        )
+        dem       = ee.Image("USGS/SRTMGL1_003").clip(geom)
+        hillshade = ee.Terrain.hillshade(dem, azimuth=315, elevation=45)
+        vis       = {"min": 0, "max": 255, "gamma": 1.3}
+        return hillshade.getMapId(vis)["tile_fetcher"].url_format
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_slope_contour_geojson(bounds_json: str, threshold_deg: float = 23.0) -> dict | None:
+    """
+    Compute the slope-break contour at `threshold_deg` and return as GeoJSON.
+
+    The contour is derived by:
+      1. Compute slope from SRTM.
+      2. Threshold at `threshold_deg` to create a binary mask (1 = steep, 0 = gentle).
+      3. Convert the mask boundary to vectors using reduceToVectors.
+      4. Simplify and return GeoJSON.
+
+    The resulting polylines trace the canyon-to-piedmont transition.
+
+    Args:
+        bounds_json: JSON bounding box string (same format as hillshade).
+        threshold_deg: Slope angle in degrees for the break line (default 23°).
+
+    Returns:
+        GeoJSON dict of MultiLineString/LineString features, or None on error.
+    """
+    try:
+        bounds = json.loads(bounds_json)
+        geom   = ee.Geometry.BBox(
+            bounds["west"], bounds["south"],
+            bounds["east"], bounds["north"]
+        )
+        dem   = ee.Image("USGS/SRTMGL1_003").clip(geom)
+        slope = ee.Terrain.slope(dem)
+
+        # Binary mask: 1 where slope ≥ threshold (steep canyons)
+        steep_mask = slope.gte(threshold_deg).rename("steep")
+
+        # Convert binary raster to polygon vectors — boundaries are slope-break lines
+        vectors = steep_mask.selfMask().reduceToVectors(
+            geometry        = geom,
+            scale           = 90,           # 90m — coarser for performance, clean lines
+            geometryType    = "polygon",
+            eightConnected  = False,
+            maxPixels       = 1e10,
+            tileScale       = 16,
+            bestEffort      = True,
+        ).map(lambda f: f.simplify(maxError=200))
+
+        # Limit features to avoid payload issues
+        info = vectors.limit(300).getInfo()
+        return info
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_huc12_for_bounds(bounds_json: str) -> dict | None:
+    """
+    Fetch HUC-12 polygon boundaries within the given bounding box.
+
+    Returns GeoJSON FeatureCollection of HUC-12 polygons with properties:
+        huc12, name, areaacres
+    """
+    try:
+        bounds = json.loads(bounds_json)
+        geom   = ee.Geometry.BBox(
+            bounds["west"], bounds["south"],
+            bounds["east"], bounds["north"]
+        )
+        huc12 = (
+            ee.FeatureCollection("USGS/WBD/2017/HUC12")
+            .filterBounds(geom)
+            .map(lambda f: f.simplify(maxError=100))
+        )
+        return huc12.limit(200).getInfo()
+    except Exception:
+        return None
+
+
+# ==============================================================================
+# LEGEND HTML
+# ==============================================================================
+
+_LEGEND_HTML = """
+<div style="
+    position: fixed;
+    bottom: 28px; right: 12px; z-index: 1000;
+    background: rgba(15,25,40,0.92);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+    color: #e0e0e0;
+    min-width: 210px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+">
+  <div style="font-weight:700;font-size:13px;margin-bottom:8px;
+              letter-spacing:0.5px;color:#ffffff;">MODEL ACCURACY</div>
+
+  <!-- gradient bar -->
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+    <span style="color:#6aade4;font-size:11px;">Under</span>
+    <div style="
+        flex:1; height:10px; border-radius:5px;
+        background: linear-gradient(to right, #1565C0, #F5F0E8, #C03915);
+    "></div>
+    <span style="color:#e05c3a;font-size:11px;">Over</span>
+  </div>
+  <div style="display:flex;justify-content:space-between;
+              font-size:10px;color:#888;margin-bottom:10px;">
+    <span>0×</span><span>1× perfect</span><span>4×</span>
+  </div>
+
+  <!-- deposit dot -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+    <svg width="14" height="14">
+      <circle cx="7" cy="7" r="5" fill="white" stroke="#555" stroke-width="1"/>
+    </svg>
+    <span>USGS deposit (fan apex)</span>
+  </div>
+
+  <!-- slope contour line -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+    <svg width="14" height="14">
+      <line x1="0" y1="7" x2="14" y2="7" stroke="#e0d8cc" stroke-width="1.5"
+            stroke-dasharray="4 2"/>
+    </svg>
+    <span>Slope break ≥ 23°</span>
+  </div>
+
+  <!-- HUC-12 -->
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+    <svg width="14" height="14">
+      <rect x="1" y="1" width="12" height="12"
+            fill="rgba(100,180,255,0.18)" stroke="#64b4ff" stroke-width="1.5"
+            rx="1"/>
+    </svg>
+    <span>HUC-12 watershed</span>
+  </div>
+
+  <!-- fire perimeter -->
+  <div style="display:flex;align-items:center;gap:8px;">
+    <svg width="14" height="14">
+      <rect x="1" y="1" width="12" height="12"
+            fill="none" stroke="#cc4400" stroke-width="1.5"
+            stroke-dasharray="4 2" rx="1"/>
+    </svg>
+    <span>Fire perimeter</span>
+  </div>
+</div>
+"""
+
+
+# ==============================================================================
+# MAIN MAP RENDERER
+# ==============================================================================
+
+def render_residual_map(
+    fire_name: str,
+    df: pd.DataFrame,
+    fire_perimeter_gdf=None,
+):
+    """
+    Four-layer geomorphic residual map for a single fire.
+
+    Layers (bottom → top):
+      1. Hillshade basemap  — SRTM via GEE tile (always on)
+      2. HUC-12 polygons    — colored by predicted/observed ratio (toggle)
+      3. Slope-break contour — 23° threshold from SRTM (toggle)
+      4. Deposit points     — fixed-size white dots at fan apex (toggle)
+
+    All GEE calls are cached at (bounds, fire_name) so rerenders are instant.
+
+    Args:
+        fire_name:          Uppercase fire name key (e.g. "THOMAS").
+        df:                 Aggregated residuals DataFrame from calculate_residuals().
+        fire_perimeter_gdf: Optional GeoDataFrame of fire boundary polygons.
+    """
+    if df.empty:
+        st.warning(f"No deposit coordinates available for {fire_name}.")
+        return
+
+    # ── Compute map bounds from deposit points (+ buffer) ────────────────────
+    lat_pad = 0.10
+    lon_pad = 0.15
+    south = float(df["DepositLatitude"].min())  - lat_pad
+    north = float(df["DepositLatitude"].max())  + lat_pad
+    west  = float(df["DepositLongitude"].min()) - lon_pad
+    east  = float(df["DepositLongitude"].max()) + lon_pad
+
+    # Extend to cover fire perimeter if present
+    if fire_perimeter_gdf is not None and not fire_perimeter_gdf.empty:
+        perim_bounds = fire_perimeter_gdf.total_bounds   # [minx, miny, maxx, maxy]
+        west  = min(west,  float(perim_bounds[0]) - lon_pad)
+        south = min(south, float(perim_bounds[1]) - lat_pad)
+        east  = max(east,  float(perim_bounds[2]) + lon_pad)
+        north = max(north, float(perim_bounds[3]) + lat_pad)
+
+    bounds_json = json.dumps({
+        "west": round(west, 4), "south": round(south, 4),
+        "east": round(east, 4), "north": round(north, 4),
+    })
+
+    center_lat = (south + north) / 2
+    center_lon = (west  + east)  / 2
+
+    # ── Layer toggle controls ─────────────────────────────────────────────────
+    fire_key = fire_name.replace(" ", "_").lower()
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        show_hillshade = st.checkbox(
+            "Hillshade basemap", value=True,
+            key=f"hs_{fire_key}",
+            help="SRTM-derived hillshade — shows canyon topography"
+        )
+    with c2:
+        show_huc12 = st.checkbox(
+            "HUC-12 sub-basins", value=True,
+            key=f"huc_{fire_key}",
+            help="Watersheds colored by predicted÷observed ratio"
+        )
+    with c3:
+        show_slope = st.checkbox(
+            "Slope break (≥ 23°)", value=True,
+            key=f"slope_{fire_key}",
+            help="Canyon-to-piedmont transition — where debris flows accelerate"
+        )
+    with c4:
+        show_deposits = st.checkbox(
+            "USGS deposit points", value=True,
+            key=f"dep_{fire_key}",
+            help="Fan apex measurement locations from Crowder et al. (2025)"
+        )
+
+    # ── Fetch GEE layers (cached) ─────────────────────────────────────────────
+    hillshade_url   = None
+    slope_geojson   = None
+    huc12_geojson   = None
+
+    with st.spinner("Loading terrain and watershed layers…"):
+        if show_hillshade:
+            hillshade_url = _fetch_hillshade_url(bounds_json)
+
+        if show_slope:
+            slope_geojson = _fetch_slope_contour_geojson(bounds_json, threshold_deg=23.0)
+
+        if show_huc12:
+            huc12_geojson = _fetch_huc12_for_bounds(bounds_json)
+
+    # ── Build ratio lookup keyed by huc12 ID ─────────────────────────────────
+    # We match HUC-12 polygons to basin residuals via WatershedID.
+    # WatershedID in the CSV is expected to be a 12-digit HUC code or a name.
+    # We build a ratio lookup on WatershedID stripped to digits for fuzzy match.
+    ratio_lookup: dict[str, float] = {}
+    for _, row in df.iterrows():
+        wid = str(row["WatershedID"]).strip()
+        ratio_lookup[wid] = float(row["Ratio"])
+        # Also index by trailing 12 digits in case of padded codes
+        digits = "".join(filter(str.isdigit, wid))
+        if digits:
+            ratio_lookup[digits] = float(row["Ratio"])
+
+    # ── Build Folium map ──────────────────────────────────────────────────────
+    # Base tiles: CartoDB dark for contrast with hillshade overlay
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=11,
+        tiles="CartoDB DarkMatter",
+        zoom_control=True,
+    )
+
+    # ── Layer 1: Hillshade overlay ────────────────────────────────────────────
+    if show_hillshade and hillshade_url:
+        folium.TileLayer(
+            tiles=hillshade_url,
+            attr="USGS SRTM / Google Earth Engine",
+            name="Hillshade (SRTM)",
+            overlay=True,
+            opacity=0.55,
+        ).add_to(m)
+    elif show_hillshade:
+        # Fallback: OpenTopoMap if GEE unavailable
+        folium.TileLayer(
+            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+            attr="OpenTopoMap",
+            name="Topographic (fallback)",
+            overlay=False,
+            opacity=0.8,
+        ).add_to(m)
+
+    # ── Layer 2: HUC-12 polygon fill ─────────────────────────────────────────
+    if show_huc12 and huc12_geojson:
+        def _huc12_style(feature):
+            props   = feature.get("properties", {})
+            huc_id  = str(props.get("huc12", "")).strip()
+            digits  = "".join(filter(str.isdigit, huc_id))
+
+            ratio = ratio_lookup.get(huc_id) or ratio_lookup.get(digits)
+
+            if ratio is not None:
+                fill  = ratio_to_hex(ratio)
+                alpha = 0.70
+                weight = 1.5
+                border = "#ffffff"
+            else:
+                # HUC-12 with no deposit measurement — show outline only
+                fill  = "transparent"
+                alpha = 0.0
+                weight = 0.8
+                border = "rgba(120,160,200,0.3)"
+
+            return {
+                "fillColor":   fill,
+                "color":       border,
+                "weight":      weight,
+                "fillOpacity": alpha,
+            }
+
+        def _huc12_tooltip(feature):
+            props  = feature.get("properties", {})
+            huc_id = str(props.get("huc12", "")).strip()
+            digits = "".join(filter(str.isdigit, huc_id))
+            name   = props.get("name", "Unknown basin")
+            ratio  = ratio_lookup.get(huc_id) or ratio_lookup.get(digits)
+
+            if ratio is not None:
+                label, direction = ratio_label(ratio)
+                color = ratio_to_hex(ratio)
+                html = (
+                    f"<div style='font-family:monospace;font-size:12px;"
+                    f"min-width:190px;background:#0f1928;color:#e0e0e0;"
+                    f"padding:8px 10px;border-radius:6px;"
+                    f"border-left:4px solid {color}'>"
+                    f"<b>{name}</b><br>"
+                    f"<span style='color:#aaa'>HUC-12: {huc_id}</span><br>"
+                    f"<hr style='border-color:#333;margin:4px 0'>"
+                    f"<span style='color:{color};font-weight:bold'>{label}</span>"
+                    f"</div>"
+                )
+            else:
+                html = (
+                    f"<div style='font-family:monospace;font-size:12px;"
+                    f"background:#0f1928;color:#888;padding:8px 10px;"
+                    f"border-radius:6px'>"
+                    f"<b>{name}</b><br>"
+                    f"<span style='color:#555'>No USGS deposit measured</span>"
+                    f"</div>"
+                )
+            return folium.GeoJsonTooltip(
+                fields=[], aliases=[], labels=False,
+                style=(
+                    "background:transparent;border:none;"
+                    "box-shadow:none;padding:0"
+                ),
+            )
+
+        folium.GeoJson(
+            huc12_geojson,
+            name="HUC-12 sub-basins",
+            style_function=_huc12_style,
+            tooltip=folium.GeoJsonTooltip(
+                fields=["huc12", "name"],
+                aliases=["HUC-12:", "Basin:"],
+                localize=True,
+                sticky=False,
+                style=(
+                    "background:#0f1928;color:#e0e0e0;font-family:monospace;"
+                    "font-size:12px;border:1px solid #333;border-radius:5px;"
+                ),
+            ),
+        ).add_to(m)
+
+    # ── Layer 3: Slope-break contour (canyon boundary) ────────────────────────
+    if show_slope and slope_geojson:
+        def _slope_style(feature):
+            return {
+                "color":       "#e0d8cc",
+                "weight":      1.2,
+                "opacity":     0.55,
+                "fillColor":   "transparent",
+                "fillOpacity": 0.0,
+            }
+
+        folium.GeoJson(
+            slope_geojson,
+            name="Slope break ≥ 23°",
+            style_function=_slope_style,
+            tooltip=folium.Tooltip(
+                "Slope ≥ 23° — canyon system / piedmont boundary",
+                sticky=False,
+            ),
+        ).add_to(m)
+
+    # ── Fire perimeter ────────────────────────────────────────────────────────
+    if fire_perimeter_gdf is not None and not fire_perimeter_gdf.empty:
+        perim = fire_perimeter_gdf.copy()
+        # Sanitize dtypes for GeoJSON serialization
+        for col in perim.columns:
+            if col == "geometry":
+                continue
+            if pd.api.types.is_datetime64_any_dtype(perim[col]):
+                perim[col] = perim[col].astype(str)
+            elif perim[col].dtype == object:
+                perim[col] = perim[col].astype(str)
+
+        folium.GeoJson(
+            perim.__geo_interface__,
+            name="Fire perimeter",
+            style_function=lambda x: {
+                "fillColor":   "transparent",
+                "color":       "#cc4400",
+                "weight":      2.0,
+                "dashArray":   "7 4",
+                "fillOpacity": 0.0,
+            },
+            tooltip=folium.Tooltip(
+                f"{fire_name.title()} fire perimeter",
+                sticky=False,
+            ),
+        ).add_to(m)
+
+    # ── Layer 4: USGS deposit points (fan apex locations) ────────────────────
+    if show_deposits:
+        for _, row in df.iterrows():
+            # Sanitize row for string interpolation
+            row_safe = row.apply(lambda x: str(x) if hasattr(x, "isoformat") else x)
+            ratio    = float(row_safe["Ratio"])
+            label, _ = ratio_label(ratio)
+            dot_color = ratio_to_hex(ratio)
+
+            obs_vol  = int(float(row_safe["Volume_m3"]))
+            pred_vol = int(float(row_safe["Predicted_m3"]))
+
+            tooltip_html = (
+                f"<div style='font-family:monospace;font-size:12px;"
+                f"min-width:220px;background:#0f1928;color:#e0e0e0;"
+                f"padding:10px 12px;border-radius:7px;"
+                f"border-left:4px solid {dot_color}'>"
+                f"<b>{row_safe['WatershedID']}</b>"
+                f"<span style='color:#888;font-size:10px'> · fan apex</span><br>"
+                f"<hr style='border-color:#2a3a4a;margin:5px 0'>"
+                f"<span style='color:#aaa'>Observed:</span>  "
+                f"<b>{obs_vol:,} m³</b><br>"
+                f"<span style='color:#aaa'>Predicted:</span> "
+                f"<b>{pred_vol:,} m³</b><br>"
+                f"<span style='color:{dot_color};font-weight:600'>{label}</span><br>"
+                f"<hr style='border-color:#2a3a4a;margin:5px 0'>"
+                f"<span style='color:#888;font-size:10px'>"
+                f"i15 = {float(row_safe['i15']):.1f} mm/hr · "
+                f"Bmh = {float(row_safe['AreaModHigh_km2']):.2f} km² · "
+                f"R = {float(row_safe['Relief_m']):.0f} m"
+                f"</span></div>"
+            )
+
+            # White ring with ratio-colored fill — fixed radius 8 for all points
+            folium.CircleMarker(
+                location=[
+                    float(row_safe["DepositLatitude"]),
+                    float(row_safe["DepositLongitude"]),
+                ],
+                radius=8,
+                color="white",
+                weight=2,
+                fill=True,
+                fill_color=dot_color,
+                fill_opacity=0.90,
+                tooltip=folium.Tooltip(tooltip_html, sticky=True),
+            ).add_to(m)
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    m.get_root().html.add_child(folium.Element(_LEGEND_HTML))
+
+    # ── Render ────────────────────────────────────────────────────────────────
+    st_folium(
+        m,
+        use_container_width=True,
+        height=520,
+        key=f"residual_map_{fire_key}_v{int(show_hillshade)}{int(show_huc12)}{int(show_slope)}{int(show_deposits)}",
+    )
+
+    # ── Colour-ratio table below map ──────────────────────────────────────────
+    if not df.empty:
+        st.markdown("##### Basin accuracy summary")
+        display = df[["WatershedID", "Volume_m3", "Predicted_m3", "Ratio", "i15"]].copy()
+        display = display.rename(columns={
+            "WatershedID":    "Basin",
+            "Volume_m3":      "Observed (m³)",
+            "Predicted_m3":   "Predicted (m³)",
+            "Ratio":          "Pred÷Obs ratio",
+            "i15":            "i15 (mm/hr)",
+        })
+        display = display.sort_values("Pred÷Obs ratio", ascending=False)
+        display["Observed (m³)"]   = display["Observed (m³)"].round(0).astype(int)
+        display["Predicted (m³)"]  = display["Predicted (m³)"].round(0).astype(int)
+        display["Pred÷Obs ratio"]  = display["Pred÷Obs ratio"].round(2)
+        display["i15 (mm/hr)"]     = display["i15 (mm/hr)"].round(1)
+
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ==============================================================================
+# GAUGE PROVENANCE CARD (unchanged from original — kept for validation_page.py)
+# ==============================================================================
+
+def render_gauge_provenance_card(fire_name: str, df: pd.DataFrame):
+    """
+    Show rain gauge locations and lines connecting each basin to its gauge.
+    If gauge coordinates are unavailable, show an explanatory callout.
+    """
+    has_gauge = (
+        "RainGageLatitude" in df.columns
+        and not df["RainGageLatitude"].isin([-9999]).all()
+        and df["RainGageLatitude"].notna().any()
+    )
+
+    if not has_gauge:
+        st.info(
+            f"**What is a rain gauge and why does it matter here?** "
+            f"A rain gauge is a physical instrument placed in the field that records "
+            f"how much rain falls at that exact location. The critical input to the "
+            f"Gartner model — peak 15-minute rainfall intensity (i15) — must come "
+            f"from a gauge that was recording during the actual debris flow storm. "
+            f"For {fire_name.title()}, the USGS inventory does not include GPS "
+            f"coordinates for the gauges that supplied i15 values. This means we "
+            f"cannot map exactly where the rainfall was measured or how far each "
+            f"measurement traveled before being assigned to a basin. The i15 values "
+            f"were likely derived from isohyetal maps — regional rainfall contour "
+            f"maps interpolated between multiple gauge stations. Despite this "
+            f"limitation, the model achieves strong rank correlation (ρ ≥ 0.895) "
+            f"because burn severity and watershed relief carry the primary signal "
+            f"for distinguishing high-risk from low-risk basins. The rank ordering "
+            f"works even when rainfall input is spatially generalized."
+        )
+        return
+
+    valid = df[
+        ~df["RainGageLatitude"].isin([-9999]) &
+        df["RainGageLatitude"].notna()
+    ].copy()
+
+    unique_gauges = valid[["RainGageLatitude", "RainGageLongitude"]].drop_duplicates()
+
+    center_lat = valid["DepositLatitude"].mean()
+    center_lon = valid["DepositLongitude"].mean()
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=12,
+        tiles="CartoDB positron",
+    )
+
+    for _, gauge in unique_gauges.iterrows():
+        folium.Marker(
+            location=[float(gauge["RainGageLatitude"]),
+                      float(gauge["RainGageLongitude"])],
+            icon=folium.Icon(color="blue", icon="tint", prefix="fa"),
+            tooltip=folium.Tooltip(
+                f"<b>Rain gauge</b><br>"
+                f"Lat: {gauge['RainGageLatitude']:.4f}<br>"
+                f"Lon: {gauge['RainGageLongitude']:.4f}",
+                sticky=True,
+            ),
+        ).add_to(m)
+
+    for _, row in valid.iterrows():
+        row = row.apply(lambda x: str(x) if hasattr(x, "isoformat") else x)
+        glat = float(row["RainGageLatitude"])
+        glon = float(row["RainGageLongitude"])
+        dlat = float(row["DepositLatitude"])
+        dlon = float(row["DepositLongitude"])
+
+        dist_km = math.sqrt(
+            ((glat - dlat) * 111) ** 2 +
+            ((glon - dlon) * 85)  ** 2
+        )
+        opacity = max(0.15, 1.0 - dist_km / 15.0)
+
+        folium.PolyLine(
+            locations=[[dlat, dlon], [glat, glon]],
+            color="#1d6fa4",
+            weight=1.5,
+            opacity=opacity,
+            tooltip=f"Distance to gauge: {dist_km:.1f} km",
+        ).add_to(m)
+
+        folium.CircleMarker(
+            location=[dlat, dlon],
+            radius=7,
+            color="white",
+            weight=1,
+            fill=True,
+            fill_color="#e8896a",
+            fill_opacity=0.85,
+            tooltip=folium.Tooltip(
+                f"<b>{row['WatershedID']}</b><br>"
+                f"i15 = {row['i15']:.1f} mm/hr<br>"
+                f"Gauge distance: {dist_km:.1f} km",
+                sticky=True,
+            ),
+        ).add_to(m)
+
+    st.caption(
+        "Blue markers = rain gauges. Orange circles = debris flow deposit locations. "
+        "Lines connect each basin to its assigned gauge. "
+        "Line opacity fades with distance — a faint line means rainfall intensity "
+        "was measured far from the basin and spatially extrapolated."
+    )
+    st_folium(m, use_container_width=True, height=380,
+              key=f"gauge_map_{fire_name}")
