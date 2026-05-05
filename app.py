@@ -117,6 +117,7 @@ if not cal_fires.empty:
         fire_series = fire_series.fillna(cal_fires['mission'])
 
     raw_fire_list = sorted(fire_series.dropna().astype(str).unique())
+    st.sidebar.caption(f"DEBUG: loaded fires = {list(raw_fire_list)}")
 
     # Canonical map: display label (title-case) → all-caps GeoJSON FIRE_NAME key.
     _VALIDATED_MAP = {
