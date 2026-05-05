@@ -1,3 +1,11 @@
 .streamlit/secrets.toml
 .DS_Store
 **/.DS_Store
+node_modules/
+temp_fire_data_v4/
+*.pyc
+__pycache__/
+.Rhistory
+pull_*.py
+patch_*.py
+poster_v2.js
