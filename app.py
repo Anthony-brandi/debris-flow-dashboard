@@ -85,49 +85,35 @@ if 'ee_initialized' not in st.session_state:
 def fetch_and_extract_fire_data():
     zip_path    = 'Master_Fire_Dataset.geojson.zip'
     extract_dir = 'temp_fire_data_v4'
+    TARGET_FILES = {'Thomas.geojson', 'Station.geojson', 'GrandPrix.geojson', 'Old.geojson'}
     try:
+        os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_members = [
-                m for m in zip_ref.namelist()
-                if not m.startswith('__MACOSX') and m.endswith('.geojson')
-            ]
-            zip_basenames = {os.path.basename(m) for m in zip_members}
-
-            if os.path.exists(extract_dir):
-                disk_basenames = {
-                    f for f in os.listdir(extract_dir) if f.endswith('.geojson')
-                }
-            else:
-                os.makedirs(extract_dir)
-                disk_basenames = set()
-
-            missing = zip_basenames - disk_basenames
-            for member in zip_members:
-                if os.path.basename(member) in missing:
-                    zip_ref.extract(member, extract_dir)
+            for member in zip_ref.namelist():
+                basename = os.path.basename(member)
+                if basename in TARGET_FILES:
+                    source = zip_ref.open(member)
+                    target_path = os.path.join(extract_dir, basename)
+                    with open(target_path, 'wb') as target:
+                        target.write(source.read())
 
         gdfs = []
-        for file in os.listdir(extract_dir):
-            if file.endswith('.geojson'):
-                geojson_path = os.path.join(extract_dir, file)
-                fires        = gpd.read_file(geojson_path)
-                possible_names = [
-                    'incident_n', 'FIRE_NAME', 'Fire_Name', 'Name', 'name', 'mission'
-                ]
-                actual_name_col = next(
-                    (col for col in possible_names if col in fires.columns),
-                    fires.columns[0]
-                )
-                fires = fires.rename(columns={actual_name_col: 'incident_n'})
-                fires = fires.dissolve(by='incident_n').reset_index()
-                gdfs.append(fires.to_crs(epsg=4326))
+        for fname in TARGET_FILES:
+            fpath = os.path.join(extract_dir, fname)
+            if not os.path.exists(fpath):
+                continue
+            fires = gpd.read_file(fpath)
+            if 'FIRE_NAME' in fires.columns:
+                fires = fires.rename(columns={'FIRE_NAME': 'incident_n'})
+            fires = fires.to_crs(epsg=4326)
+            gdfs.append(fires)
+
         if gdfs:
             return pd.concat(gdfs, ignore_index=True)
-        raise FileNotFoundError("No .geojson file found in archive.")
+        raise FileNotFoundError("No target fire files found in archive.")
     except Exception as e:
         st.error(f"Failed to load perimeter data: {e}")
         return gpd.GeoDataFrame()
-
 
 # ==========================================
 # 5. GLOBAL FIRE SELECTION
