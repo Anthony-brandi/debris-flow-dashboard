@@ -84,7 +84,7 @@ if 'ee_initialized' not in st.session_state:
 @st.cache_data
 def fetch_and_extract_fire_data():
     zip_path    = 'Master_Fire_Dataset.geojson.zip'
-    extract_dir = 'temp_fire_data_v4'
+    extract_dir = 'temp_fire_data_v5'
     TARGET_FILES = {'Thomas.geojson', 'Station.geojson', 'GrandPrix.geojson', 'Old.geojson'}
     try:
         os.makedirs(extract_dir, exist_ok=True)
