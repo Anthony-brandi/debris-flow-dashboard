@@ -81,7 +81,7 @@ if 'ee_initialized' not in st.session_state:
 # ==========================================
 # 4. FIRE DATA LOADER
 # ==========================================
-@st.cache_data
+@st.cache_data(version=2)
 def fetch_and_extract_fire_data():
     zip_path = 'Master_Fire_Dataset.geojson.zip'
     TARGET = {'Thomas.geojson', 'Station.geojson', 'GrandPrix.geojson', 'Old.geojson'}
