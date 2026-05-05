@@ -83,34 +83,24 @@ if 'ee_initialized' not in st.session_state:
 # ==========================================
 @st.cache_data
 def fetch_and_extract_fire_data():
-    zip_path    = 'Master_Fire_Dataset.geojson.zip'
-    extract_dir = 'temp_fire_data_v5'
-    TARGET_FILES = {'Thomas.geojson', 'Station.geojson', 'GrandPrix.geojson', 'Old.geojson'}
+    zip_path = 'Master_Fire_Dataset.geojson.zip'
+    TARGET = {'Thomas.geojson', 'Station.geojson', 'GrandPrix.geojson', 'Old.geojson'}
     try:
-        os.makedirs(extract_dir, exist_ok=True)
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            for member in zip_ref.namelist():
-                basename = os.path.basename(member)
-                if basename in TARGET_FILES:
-                    source = zip_ref.open(member)
-                    target_path = os.path.join(extract_dir, basename)
-                    with open(target_path, 'wb') as target:
-                        target.write(source.read())
-
         gdfs = []
-        for fname in TARGET_FILES:
-            fpath = os.path.join(extract_dir, fname)
-            if not os.path.exists(fpath):
-                continue
-            fires = gpd.read_file(fpath)
-            if 'FIRE_NAME' in fires.columns:
-                fires = fires.rename(columns={'FIRE_NAME': 'incident_n'})
-            fires = fires.to_crs(epsg=4326)
-            gdfs.append(fires)
-
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            for name in z.namelist():
+                basename = os.path.basename(name)
+                if basename not in TARGET:
+                    continue
+                with z.open(name) as f:
+                    import io
+                    gdf = gpd.read_file(io.BytesIO(f.read()))
+                    if 'FIRE_NAME' in gdf.columns:
+                        gdf = gdf.rename(columns={'FIRE_NAME': 'incident_n'})
+                    gdfs.append(gdf.to_crs(epsg=4326))
         if gdfs:
             return pd.concat(gdfs, ignore_index=True)
-        raise FileNotFoundError("No target fire files found in archive.")
+        raise FileNotFoundError("No fire files found.")
     except Exception as e:
         st.error(f"Failed to load perimeter data: {e}")
         return gpd.GeoDataFrame()
