@@ -15,12 +15,7 @@ import ee
 from validation_maps import (
     calculate_residuals,
     render_residual_map,
-    render_rank_chart,
-    render_ratio_chart,
     render_gauge_provenance_card,
-    render_three_fire_bar_chart,
-    render_huc12_deposit_map,
-    render_matched_polygon_map,
 )
 
 
@@ -684,7 +679,7 @@ def render_academic_tab(df_full: pd.DataFrame, r15: float):
         state = str(row.get("State", "")).upper()
         eco   = str(row.get("EPALevelIIIEcoregion", "")).lower()
         if state == "CA" or "california" in eco:
-            return "Southern California"
+            return "California chaparral"
         elif state in ["CO", "UT", "NM"] or "rocky" in eco:
             return "Rocky Mountains"
         elif state in ["WA", "OR"] or "cascade" in eco:
@@ -694,10 +689,10 @@ def render_academic_tab(df_full: pd.DataFrame, r15: float):
     df_pred["Region"] = df_pred.apply(region, axis=1)
 
     color_map = {
-        "Southern California": "#e94560",
-        "Rocky Mountains":     "#f5a623",
-        "Pacific Northwest":   "#4ecdc4",
-        "Other western US":    "#888780"
+        "California chaparral": "#e94560",
+        "Rocky Mountains":      "#f5a623",
+        "Pacific Northwest":    "#4ecdc4",
+        "Other western US":     "#888780"
     }
 
     fig = go.Figure()
@@ -1125,7 +1120,7 @@ def page_validation():
             "Spearman rho shown above each fire group."
         )
         st.markdown("---")
-        render_three_fire_bar_chart(residuals)
+        st.info('Three-fire bar chart coming soon.')
 
     # ------------------------------------------------------------------
     # TAB 1 -- RESIDUAL MAPS (primary view)
@@ -1225,14 +1220,7 @@ def page_validation():
                     fire_perimeter_gdf=fire_perimeters.get(fire_key),
                 )
             with chart_col:
-                render_rank_chart(
-                    fire_name=fire_key,
-                    df=residuals.get(fire_key, pd.DataFrame()),
-                )
-                render_ratio_chart(
-                    fire_name=fire_key,
-                    df=residuals.get(fire_key, pd.DataFrame()),
-                )
+                pass  # rank and ratio charts coming soon
 
             st.markdown("**Rain gauge data quality**")
             render_gauge_provenance_card(
@@ -1304,7 +1292,7 @@ def page_validation():
         )
         st.markdown("---")
 
-        render_three_fire_bar_chart(residuals)
+        st.info('Three-fire bar chart coming soon.')
 
         st.markdown("---")
 
@@ -1319,11 +1307,11 @@ def page_validation():
             df = residuals.get(fire_key, pd.DataFrame())
 
             st.markdown("**Deposit points on HUC-12 grid**")
-            render_huc12_deposit_map(fire_key, df)
+            # render_huc12_deposit_map(fire_key, df)
 
             st.markdown("---")
 
             st.markdown("**HUC-12 polygons colored by model error**")
-            render_matched_polygon_map(fire_key, df)
+            # render_matched_polygon_map(fire_key, df)
 
             st.markdown("---")
